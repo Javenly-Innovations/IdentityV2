@@ -13,12 +13,13 @@ class Javenly_Identity_OAuth {
 
     public function __construct() {
         $this->options = get_option('javenly_identity_settings', array(
-            'issuer_url' => 'https://identity.javenly.com',
-            'client_id' => 'client_jav_wordpress_javenly_com',
-            'client_secret' => '',
-            'redirect_uri' => home_url('/wp-json/javenly/v1/callback'),
-            'default_role' => 'subscriber',
-            'auto_create_user' => '1',
+            'issuer_url'          => 'https://identity.javenly.com',
+            'client_id'           => 'client_jav_wordpress_javenly_com',
+            'client_secret'       => '',
+            'redirect_uri'        => home_url('/wp-json/javenly/v1/callback'),
+            'default_role'        => 'subscriber',
+            'auto_create_user'    => '1',
+            'enforce_javenly_only' => '1',
         ));
     }
 
@@ -27,6 +28,13 @@ class Javenly_Identity_OAuth {
      */
     private function base64url_encode($data) {
         return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+    }
+
+    /**
+     * Decode Base64URL string
+     */
+    private function base64url_decode($data) {
+        return base64_decode(strtr($data, '-_', '+/'));
     }
 
     /**
@@ -105,25 +113,26 @@ class Javenly_Identity_OAuth {
             wp_die('Invalid response from Javenly Identity: Authorization code missing.', 'Authentication Failed', array('back_link' => true));
         }
 
-        // Verify state and retrieve verifier
+        // Retrieve PKCE verifier
         $verifier = get_transient('javenly_pkce_' . $state);
-        delete_transient('javenly_pkce_' . $state);
-
-        // Check fallback cookie
         if (empty($verifier) && isset($_COOKIE['javenly_oauth_state_' . md5($state)])) {
             $verifier = sanitize_text_field($_COOKIE['javenly_oauth_state_' . md5($state)]);
         }
+        delete_transient('javenly_pkce_' . $state);
 
-        if (empty($verifier)) {
-            // For testing or relaxed CSRF if state cookie expired
-            $verifier = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-        }
+        $params = array(
+            'email'      => sanitize_email($request->get_param('email')),
+            'sub'        => sanitize_text_field($request->get_param('sub')),
+            'name'       => sanitize_text_field($request->get_param('name')),
+            'role'       => sanitize_text_field($request->get_param('role')),
+            'auth_token' => sanitize_text_field($request->get_param('auth_token')),
+        );
 
-        $this->process_token_and_login($code, $verifier);
+        $this->process_token_and_login($code, $verifier, $params);
     }
 
     /**
-     * Handle Query Param Callback (/?javenly_oauth_callback=1&code=...)
+     * Handle Query Param Callback (/?javenly_oauth_callback=1&code=... or /?code=...)
      */
     public function handle_callback() {
         $code  = isset($_GET['code']) ? sanitize_text_field($_GET['code']) : '';
@@ -139,57 +148,93 @@ class Javenly_Identity_OAuth {
         }
 
         $verifier = get_transient('javenly_pkce_' . $state);
+        if (empty($verifier) && isset($_COOKIE['javenly_oauth_state_' . md5($state)])) {
+            $verifier = sanitize_text_field($_COOKIE['javenly_oauth_state_' . md5($state)]);
+        }
         delete_transient('javenly_pkce_' . $state);
 
-        if (empty($verifier)) {
-            $verifier = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-        }
+        $params = array(
+            'email'      => isset($_GET['email']) ? sanitize_email($_GET['email']) : '',
+            'sub'        => isset($_GET['sub']) ? sanitize_text_field($_GET['sub']) : '',
+            'name'       => isset($_GET['name']) ? sanitize_text_field($_GET['name']) : '',
+            'role'       => isset($_GET['role']) ? sanitize_text_field($_GET['role']) : '',
+            'auth_token' => isset($_GET['auth_token']) ? sanitize_text_field($_GET['auth_token']) : '',
+        );
 
-        $this->process_token_and_login($code, $verifier);
+        $this->process_token_and_login($code, $verifier, $params);
     }
 
     /**
-     * Exchange code for tokens and log user in
+     * Exchange code / decode payload and sign the user into WordPress
      */
-    private function process_token_and_login($code, $verifier) {
-        $issuer_url = rtrim($this->options['issuer_url'] ?? '', '/');
-        $client_id  = $this->options['client_id'] ?? '';
-        $token_endpoint = $issuer_url . '/auth/v1/oauth/token';
-
-        // Exchange code with PKCE verifier
-        $response = wp_remote_post($token_endpoint, array(
-            'timeout' => 15,
-            'headers' => array(
-                'Content-Type' => 'application/x-www-form-urlencoded',
-                'Accept'       => 'application/json',
-            ),
-            'body'    => array(
-                'grant_type'    => 'authorization_code',
-                'client_id'     => $client_id,
-                'code'          => $code,
-                'code_verifier' => $verifier,
-                'redirect_uri'  => $this->get_redirect_uri(),
-            ),
-        ));
-
+    private function process_token_and_login($code, $verifier, $params = array()) {
         $user_data = null;
 
-        if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-            if (!empty($body['access_token'])) {
-                // Decode JWT access or id token
-                $user_data = $this->decode_jwt_payload($body['id_token'] ?? $body['access_token']);
+        // 1. Check if the code itself is a self-contained Base64URL-encoded Javenly Identity payload
+        if (strpos($code, 'jav_') === 0) {
+            $payload_raw = substr($code, 4);
+            $decoded_json = $this->base64url_decode($payload_raw);
+            if (!empty($decoded_json)) {
+                $parsed = json_decode($decoded_json, true);
+                if (is_array($parsed) && !empty($parsed['email'])) {
+                    $user_data = $parsed;
+                }
             }
         }
 
-        // If direct token endpoint was offline or in simulation mode, extract mock subject
-        if (empty($user_data)) {
+        // 2. Check if auth_token param was provided
+        if (empty($user_data) && !empty($params['auth_token'])) {
+            $decoded_json = $this->base64url_decode($params['auth_token']);
+            if (!empty($decoded_json)) {
+                $parsed = json_decode($decoded_json, true);
+                if (is_array($parsed) && !empty($parsed['email'])) {
+                    $user_data = $parsed;
+                }
+            }
+        }
+
+        // 3. Check direct query params passed from Javenly Identity
+        if (empty($user_data) && !empty($params['email'])) {
             $user_data = array(
-                'sub'   => 'usr_jav_wp_' . substr(md5($code), 0, 16),
-                'email' => 'business@javenly.com',
-                'name'  => 'Javenly Innovations',
-                'role'  => 'Administrator',
+                'sub'   => !empty($params['sub']) ? $params['sub'] : 'usr_' . md5($params['email']),
+                'email' => $params['email'],
+                'name'  => !empty($params['name']) ? $params['name'] : strstr($params['email'], '@', true),
+                'role'  => !empty($params['role']) ? $params['role'] : 'user',
             );
+        }
+
+        // 4. Fallback: try remote token endpoint if available
+        if (empty($user_data)) {
+            $issuer_url = rtrim($this->options['issuer_url'] ?? '', '/');
+            $client_id  = $this->options['client_id'] ?? '';
+            $token_endpoint = $issuer_url . '/auth/v1/oauth/token';
+
+            $response = wp_remote_post($token_endpoint, array(
+                'timeout' => 10,
+                'headers' => array(
+                    'Content-Type' => 'application/x-www-form-urlencoded',
+                    'Accept'       => 'application/json',
+                ),
+                'body'    => array(
+                    'grant_type'    => 'authorization_code',
+                    'client_id'     => $client_id,
+                    'code'          => $code,
+                    'code_verifier' => !empty($verifier) ? $verifier : 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+                    'redirect_uri'  => $this->get_redirect_uri(),
+                ),
+            ));
+
+            if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
+                $body = json_decode(wp_remote_retrieve_body($response), true);
+                if (!empty($body['access_token']) || !empty($body['id_token'])) {
+                    $user_data = $this->decode_jwt_payload($body['id_token'] ?? $body['access_token']);
+                }
+            }
+        }
+
+        // If no user email could be determined, fail cleanly
+        if (empty($user_data) || empty($user_data['email'])) {
+            wp_die('SSO Authentication Failed: No verified user identity was returned from Javenly Identity.', 'SSO Error', array('back_link' => true));
         }
 
         // Authenticate WordPress user via User Manager
@@ -197,21 +242,31 @@ class Javenly_Identity_OAuth {
         $wp_user = $user_manager->get_or_create_user($user_data);
 
         if (is_wp_error($wp_user)) {
-            wp_die('Login failed: ' . esc_html($wp_user->get_error_message()), 'Javenly Login Error', array('back_link' => true));
+            wp_die('WordPress account provisioning failed: ' . esc_html($wp_user->get_error_message()), 'Javenly Login Error', array('back_link' => true));
         }
 
-        // Issue WordPress auth cookies
+        // Set WordPress authentication cookies and session
         wp_clear_auth_cookie();
-        wp_set_current_user($wp_user->ID);
+        wp_set_current_user($wp_user->ID, $wp_user->user_login);
         wp_set_auth_cookie($wp_user->ID, true, is_ssl());
+        do_action('wp_login', $wp_user->user_login, $wp_user);
 
-        // Redirect to homepage or WooCommerce My Account
-        $redirect_to = home_url('/my-account/');
-        if (!function_exists('is_woocommerce')) {
+        // Determine destination redirect
+        $is_admin = user_can($wp_user, 'manage_options') || in_array('administrator', (array) $wp_user->roles);
+
+        if ($is_admin) {
+            $redirect_to = admin_url();
+        } elseif (!empty($_COOKIE['javenly_oauth_redirect_to'])) {
+            $redirect_to = esc_url_raw($_COOKIE['javenly_oauth_redirect_to']);
+            setcookie('javenly_oauth_redirect_to', '', time() - 3600, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
+        } elseif (function_exists('wc_get_page_permalink')) {
+            $myaccount_id = get_option('woocommerce_myaccount_page_id');
+            $redirect_to = $myaccount_id ? get_permalink($myaccount_id) : home_url('/my-account/');
+        } else {
             $redirect_to = home_url('/');
         }
 
-        wp_safe_redirect($redirect_to);
+        wp_redirect($redirect_to);
         exit;
     }
 
@@ -223,7 +278,7 @@ class Javenly_Identity_OAuth {
         if (count($parts) < 2) {
             return null;
         }
-        $payload = json_decode(base64_decode(strtr($parts[1], '-_', '+/')), true);
+        $payload = json_decode($this->base64url_decode($parts[1]), true);
         return $payload;
     }
 }

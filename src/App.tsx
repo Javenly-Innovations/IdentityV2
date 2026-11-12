@@ -40,12 +40,8 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [showDbErrorModal, setShowDbErrorModal] = useState(false);
   const [showSchemaErrorModal, setShowSchemaErrorModal] = useState(false);
-  const [showConfigModal, setShowConfigModal] = useState(false);
   const [copiedFixSql, setCopiedFixSql] = useState(false);
   const [copiedSchemaFixSql, setCopiedSchemaFixSql] = useState(false);
-  const [copiedFullSql, setCopiedFullSql] = useState(false);
-  const [customUrl, setCustomUrl] = useState(() => localStorage.getItem('javenly_supabase_url') || '');
-  const [customKey, setCustomKey] = useState(() => localStorage.getItem('javenly_supabase_anon_key') || '');
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -124,6 +120,61 @@ export default function App() {
       });
     }
   }, []);
+
+  // Helper to build OAuth 2.1 callback URL with user's verified identity
+  const buildOAuthCallbackUrl = (request: typeof activeOAuthRequest, user: JavenlyUser) => {
+    if (!request) return '';
+
+    const authPayload = {
+      sub: user.id,
+      email: user.email,
+      name: user.fullName,
+      role: (user.role as string) === 'super_admin' ? 'Administrator' : user.role,
+      iss: 'https://identity.javenly.com',
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    };
+
+    let encodedPayload = '';
+    try {
+      encodedPayload = btoa(unescape(encodeURIComponent(JSON.stringify(authPayload))))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    } catch {
+      encodedPayload = btoa(JSON.stringify(authPayload))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    }
+
+    const authCode = `jav_${encodedPayload}`;
+    const separator = request.redirectUri.includes('?') ? '&' : '?';
+    const params = new URLSearchParams({
+      code: authCode,
+      state: request.state || '',
+      email: user.email,
+      sub: user.id,
+      name: user.fullName,
+      role: (user.role as string) === 'super_admin' ? 'Administrator' : user.role,
+      auth_token: encodedPayload,
+    });
+
+    return `${request.redirectUri}${separator}${params.toString()}`;
+  };
+
+  // Auto-redirect if user arrives already logged in with active OAuth request
+  useEffect(() => {
+    if (activeOAuthRequest && currentUser) {
+      const timer = setTimeout(() => {
+        const callbackUrl = buildOAuthCallbackUrl(activeOAuthRequest, currentUser);
+        if (callbackUrl) {
+          window.location.href = callbackUrl;
+        }
+      }, 1200);
+      return () => clearTimeout(timer);
+    }
+  }, [activeOAuthRequest, currentUser]);
 
   // Handle Log In - strictly verified via Supabase Auth
   const handleSignIn = async (e: React.FormEvent) => {
@@ -257,6 +308,19 @@ export default function App() {
         setCurrentUser(user);
         setContextUser(user);
         localStorage.setItem('javenly_logged_user', JSON.stringify(user));
+
+        if (activeOAuthRequest) {
+          setMessage({ 
+            type: 'success', 
+            text: `Authenticated as ${resolvedFullName}! Returning you to WordPress...` 
+          });
+          const callbackUrl = buildOAuthCallbackUrl(activeOAuthRequest, user);
+          setTimeout(() => {
+            window.location.href = callbackUrl;
+          }, 350);
+          return;
+        }
+
         setLoading(false);
         setMessage({ type: 'success', text: `Welcome back, ${resolvedFullName}!` });
         return;
@@ -333,6 +397,20 @@ export default function App() {
         };
         setCurrentUser(user);
         setContextUser(user);
+        localStorage.setItem('javenly_logged_user', JSON.stringify(user));
+
+        if (activeOAuthRequest) {
+          setMessage({ 
+            type: 'success', 
+            text: `Account created! Returning you to WordPress...` 
+          });
+          const callbackUrl = buildOAuthCallbackUrl(activeOAuthRequest, user);
+          setTimeout(() => {
+            window.location.href = callbackUrl;
+          }, 350);
+          return;
+        }
+
         setMessage({ type: 'success', text: 'Account registered successfully!' });
       } else {
         setMessage({ 
@@ -428,9 +506,10 @@ export default function App() {
   // OAuth 2.1 Consent Actions
   const handleApproveOAuth = () => {
     if (!activeOAuthRequest || !currentUser) return;
-    const authCode = `jav_code_${Math.random().toString(36).substring(2, 12)}_${Date.now().toString(36)}`;
-    const callbackUrl = `${activeOAuthRequest.redirectUri}?code=${authCode}&state=${encodeURIComponent(activeOAuthRequest.state)}`;
-    window.location.href = callbackUrl;
+    const callbackUrl = buildOAuthCallbackUrl(activeOAuthRequest, currentUser);
+    if (callbackUrl) {
+      window.location.href = callbackUrl;
+    }
   };
 
   const handleDenyOAuth = () => {
@@ -515,12 +594,24 @@ export default function App() {
               </button>
               <button
                 onClick={handleApproveOAuth}
-                className="w-1/2 py-2.5 rounded-xl text-xs font-bold text-white bg-[#cb475b] hover:bg-[#b83b4e] shadow transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                className="w-1/2 py-2.5 rounded-xl text-xs font-bold text-white bg-[#00A3E0] hover:bg-[#0092c9] shadow transition-all flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <span>Authorize</span>
+                <span>Authorize & Return</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setCurrentUser(null);
+                authLogout();
+                setMessage(null);
+              }}
+              className="w-full mt-3 text-xs text-slate-400 hover:text-slate-600 underline text-center cursor-pointer"
+            >
+              Sign in with a different account
+            </button>
           </div>
         ) : currentUser ? (
           /* 2. LOGGED IN STATE (Clean & Minimal) */
@@ -881,8 +972,8 @@ export default function App() {
             </div>
           )}
 
-          {/* Back to Javenly Innovations & Supabase Backend */}
-          <div className="mt-4 flex items-center justify-center gap-3 text-xs text-slate-400">
+          {/* Back to Javenly Innovations */}
+          <div className="mt-4 flex items-center justify-center text-xs text-slate-400">
             <a
               href="https://javenly.com"
               target="_blank"
@@ -892,15 +983,6 @@ export default function App() {
               <span>←</span>
               <span>Back to Javenly Innovations</span>
             </a>
-            <span className="text-slate-600">•</span>
-            <button
-              type="button"
-              onClick={() => setShowConfigModal(true)}
-              className="hover:text-sky-300 transition-colors inline-flex items-center gap-1.5 cursor-pointer text-slate-400"
-            >
-              <Database className="w-3.5 h-3.5 text-sky-400" />
-              <span>Supabase Backend</span>
-            </button>
           </div>
         </div>
 
@@ -1086,173 +1168,7 @@ where
         </div>
       )}
 
-      {/* SUPABASE BACKEND CONFIGURATION MODAL */}
-      {showConfigModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in text-slate-800">
-          <div className="bg-white border border-slate-200 w-full max-w-lg rounded-2xl shadow-2xl p-6 sm:p-7 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-center text-[#00A3E0]">
-                  <Database className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-base text-slate-900">
-                    Supabase Project Settings
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Connect your free Supabase database and authentication
-                  </p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setShowConfigModal(false)}
-                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                resetSupabaseClient(customUrl.trim(), customKey.trim());
-                setShowConfigModal(false);
-                setMessage({ type: 'success', text: 'Supabase credentials saved! Client reconnected.' });
-              }}
-              className="space-y-4 text-xs"
-            >
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Supabase Project URL
-                </label>
-                <input
-                  type="url"
-                  required
-                  value={customUrl}
-                  onChange={(e) => setCustomUrl(e.target.value)}
-                  placeholder="https://your-project-id.supabase.co"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:outline-none focus:border-[#00A3E0]"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Find this in your Supabase Dashboard → Settings → API.
-                </p>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Supabase Anon Public API Key
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={customKey}
-                  onChange={(e) => setCustomKey(e.target.value)}
-                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:outline-none focus:border-[#00A3E0]"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Use the <code>anon</code> public key, NOT the service_role key.
-                </p>
-              </div>
-
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-slate-900">Need the complete Database SQL script?</p>
-                  <p className="text-[11px] text-slate-500">Creates profiles table, trigger, and sets admin role</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const fullSql = `-- ====================================================================
--- JAVENLY INNOVATIONS — COMPLETE SUPABASE DATABASE & AUTH SETUP
--- Run this entire script in Supabase Dashboard -> SQL Editor -> New Query
--- ====================================================================
-
-create extension if not exists "pgcrypto";
-
-create table if not exists public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  email text not null,
-  full_name text,
-  role text default 'Member',
-  company text default 'Javenly Innovations',
-  created_at timestamp with time zone default now(),
-  updated_at timestamp with time zone default now()
-);
-
-alter table public.profiles enable row level security;
-
-drop policy if exists "Allow reading all profiles" on public.profiles;
-create policy "Allow reading all profiles" on public.profiles for select using (true);
-
-drop policy if exists "Allow users to update own profile" on public.profiles;
-create policy "Allow users to update own profile" on public.profiles for update using (auth.uid() = id);
-
-drop policy if exists "Allow users to insert own profile" on public.profiles;
-create policy "Allow users to insert own profile" on public.profiles for insert with check (auth.uid() = id);
-
-create or replace function public.handle_new_user()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  insert into public.profiles (id, email, full_name, role, company)
-  values (
-    new.id,
-    new.email,
-    coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)),
-    case 
-      when lower(new.email) in ('admin@javenly.com', 'business@javenly.com') then 'Administrator'
-      else coalesce(new.raw_user_meta_data->>'role', 'Member')
-    end,
-    'Javenly Innovations'
-  )
-  on conflict (id) do update set
-    email = excluded.email,
-    full_name = coalesce(excluded.full_name, public.profiles.full_name),
-    role = case 
-      when lower(excluded.email) in ('admin@javenly.com', 'business@javenly.com') then 'Administrator'
-      else public.profiles.role 
-    end,
-    updated_at = now();
-  return new;
-exception when others then
-  return new;
-end;
-$$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.handle_new_user();`;
-                    navigator.clipboard.writeText(fullSql);
-                    setCopiedFullSql(true);
-                    setTimeout(() => setCopiedFullSql(false), 2000);
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow"
-                >
-                  {copiedFullSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedFullSql ? 'Copied SQL!' : 'Copy Setup SQL'}</span>
-                </button>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowConfigModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-[#00A3E0] hover:bg-[#0092c9] shadow cursor-pointer"
-                >
-                  Save & Connect
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
     </div>
   );

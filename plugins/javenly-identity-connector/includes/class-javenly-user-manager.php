@@ -27,11 +27,26 @@ class Javenly_Identity_User_Manager {
     public function get_or_create_user($user_data) {
         $sub   = sanitize_text_field($user_data['sub'] ?? '');
         $email = sanitize_email($user_data['email'] ?? '');
-        $name  = sanitize_text_field($user_data['name'] ?? ($user_data['user_metadata']['full_name'] ?? 'Javenly Member'));
+        $name  = sanitize_text_field($user_data['name'] ?? ($user_data['user_metadata']['full_name'] ?? ''));
+        $role_claim = strtolower(sanitize_text_field($user_data['role'] ?? ''));
 
         if (empty($email) && empty($sub)) {
             return new WP_Error('invalid_user_data', 'Missing user identifier from Javenly Identity.');
         }
+
+        // Determine if account is an administrator
+        $is_admin = false;
+        if (
+            $email === 'business@javenly.com' ||
+            $email === 'admin@javenly.com' ||
+            $role_claim === 'super_admin' ||
+            $role_claim === 'admin' ||
+            $role_claim === 'administrator'
+        ) {
+            $is_admin = true;
+        }
+
+        $target_role = $is_admin ? 'administrator' : ($this->options['default_role'] ?? 'subscriber');
 
         // 1. Look up by stable _javenly_identity_sub
         if (!empty($sub)) {
@@ -42,7 +57,11 @@ class Javenly_Identity_User_Manager {
             ));
 
             if (!empty($users)) {
-                return $users[0];
+                $user = $users[0];
+                if ($is_admin && !in_array('administrator', (array) $user->roles)) {
+                    $user->set_role('administrator');
+                }
+                return $user;
             }
         }
 
@@ -52,19 +71,25 @@ class Javenly_Identity_User_Manager {
             if ($existing_user) {
                 // Link account safely
                 update_user_meta($existing_user->ID, '_javenly_identity_sub', $sub);
+                if ($is_admin && !in_array('administrator', (array) $existing_user->roles)) {
+                    $existing_user->set_role('administrator');
+                }
                 return $existing_user;
             }
         }
 
         // 3. Auto-create new WordPress user if enabled
         if (empty($this->options['auto_create_user'])) {
-            return new WP_Error('user_not_found', 'No existing WordPress user found for this Javenly account.');
+            return new WP_Error('user_not_found', 'No existing WordPress user found for this Javenly account and auto-creation is disabled.');
         }
 
         // Generate username from email or name
-        $base_username = sanitize_user(str_replace(array('@', '.'), '_', $email), true);
+        $base_username = sanitize_user(strstr($email, '@', true), true);
         if (empty($base_username)) {
-            $base_username = 'javenly_user_' . wp_generate_password(6, false);
+            $base_username = sanitize_user(str_replace(array('@', '.'), '_', $email), true);
+        }
+        if (empty($base_username)) {
+            $base_username = 'javenly_' . wp_generate_password(6, false);
         }
 
         $username = $base_username;
@@ -74,21 +99,13 @@ class Javenly_Identity_User_Manager {
             $counter++;
         }
 
-        // Determine user role
-        $role = $this->options['default_role'] ?? 'subscriber';
-        if ($email === 'business@javenly.com' || $email === 'admin@javenly.com') {
-            $role = 'administrator';
-        }
-
-        $random_password = wp_generate_password(32, true, true);
-
         $user_id = wp_insert_user(array(
             'user_login'   => $username,
-            'user_pass'    => $random_password,
+            'user_pass'    => wp_generate_password(32, true, true),
             'user_email'   => $email,
-            'display_name' => $name,
-            'first_name'   => $name,
-            'role'         => $role,
+            'display_name' => !empty($name) ? $name : $username,
+            'first_name'   => !empty($name) ? $name : '',
+            'role'         => $target_role,
         ));
 
         if (is_wp_error($user_id)) {
