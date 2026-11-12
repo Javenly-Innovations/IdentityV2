@@ -43,7 +43,6 @@ export default function App() {
   const [currentView, setCurrentView] = useState<'login' | 'admin'>('login');
   const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'forgot' | 'new_password'>('signin');
   const [showPassword, setShowPassword] = useState(false);
-  const [showPluginModal, setShowPluginModal] = useState(false);
   const [showDbErrorModal, setShowDbErrorModal] = useState(false);
   const [copiedFixSql, setCopiedFixSql] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
@@ -615,15 +614,6 @@ export default function App() {
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
 
-              <a
-                href="/downloads/javenly-identity-connector.zip"
-                download="javenly-identity-connector.zip"
-                className="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors flex items-center justify-center gap-1.5 border border-slate-200"
-              >
-                <Download className="w-3.5 h-3.5 text-[#00A3E0]" />
-                <span>Download WordPress Plugin (.zip)</span>
-              </a>
-
               <button
                 type="button"
                 onClick={() => {
@@ -957,77 +947,6 @@ export default function App() {
         </div>
 
       </div>
-
-      {/* WORDPRESS PLUGIN DOWNLOAD & SETUP MODAL */}
-      {showPluginModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in text-slate-800">
-          <div className="bg-white border border-slate-200 w-full max-w-lg rounded-2xl shadow-2xl p-6 sm:p-7">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2.5">
-                <img
-                  src="/assets/aistudio/Gemini_Generated_Image_5xfn6o5xfn6o5xfn-removebg-preview__1__46f6d8c3.png"
-                  alt="Javenly Innovations"
-                  className="h-7 w-auto object-contain"
-                />
-                <h3 className="font-bold text-base text-slate-900">
-                  Javenly Identity Connector for WordPress
-                </h3>
-              </div>
-              <button 
-                onClick={() => setShowPluginModal(false)}
-                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="py-4 space-y-4 text-xs">
-              <p className="text-slate-600 leading-relaxed">
-                Connect your Namecheap WordPress website at <strong>javenly.com</strong> to Javenly Identity. Adds a single sign-on <em>"Sign in with Javenly"</em> button to <code>/wp-login.php</code> and WooCommerce.
-              </p>
-
-              {/* Download Button */}
-              <div className="p-4 bg-blue-50/70 border border-blue-100 rounded-xl text-center">
-                <p className="font-semibold text-slate-800 mb-2">Ready-to-Install WordPress Plugin Archive:</p>
-                <a
-                  href="/downloads/javenly-identity-connector.zip"
-                  download="javenly-identity-connector.zip"
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-white bg-[#00A3E0] hover:bg-[#0092c9] shadow transition-colors text-xs"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Download javenly-identity-connector.zip</span>
-                </a>
-              </div>
-
-              {/* 3 Step Instructions */}
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
-                <p className="font-bold text-slate-900">3-Minute Setup on Namecheap WordPress:</p>
-                <ol className="list-decimal pl-4 space-y-1.5 text-slate-600 leading-relaxed">
-                  <li>
-                    Log in to <strong>javenly.com/wp-admin</strong>.
-                  </li>
-                  <li>
-                    Go to <strong>Plugins</strong> → <strong>Add New</strong> → <strong>Upload Plugin</strong>. Select <code>javenly-identity-connector.zip</code> and click <strong>Activate</strong>.
-                  </li>
-                  <li>
-                    In WordPress sidebar, go to <strong>Settings</strong> → <strong>Javenly Identity</strong>. Verify your portal URL and save.
-                  </li>
-                </ol>
-              </div>
-
-              <div className="flex justify-end pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowPluginModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* DATABASE TRIGGER ERROR MODAL & 1-CLICK SQL FIX */}
       {showDbErrorModal && (

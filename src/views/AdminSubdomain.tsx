@@ -163,7 +163,8 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
         });
       }
     });
-    return Array.from(map.values());
+    const fakeEmails = ['marcus.chen@javenly.com', 'sarah.jenkins@javenly.com', 'elena.rostova@gmail.com', 'david.kim@outlook.com', 'amanda.foster@icloud.com'];
+    return Array.from(map.values()).filter(u => !fakeEmails.includes(u.email?.toLowerCase()));
   }, [users, supabaseUsers]);
 
   const filteredUsers = allDisplayUsers.filter(u => 
@@ -441,7 +442,13 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
                     <tr key={u.id} className="hover:bg-slate-900/40 transition-colors">
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          <img src={u.avatarUrl} alt="" className="w-8 h-8 rounded-lg object-cover ring-1 ring-slate-700" />
+                          <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 text-xs font-bold text-sky-400">
+                            {u.email.toLowerCase().includes('admin') || u.email.toLowerCase().includes('business') ? (
+                              <img src="/assets/aistudio/Gemini_Generated_Image_5xfn6o5xfn6o5xfn-removebg-preview__1__46f6d8c3.png" alt="" className="w-5 h-5 object-contain" />
+                            ) : (
+                              <span>{(u.fullName || u.email || 'U').substring(0, 2).toUpperCase()}</span>
+                            )}
+                          </div>
                           <div>
                             <div className="flex items-center gap-1.5">
                               <p className="font-bold text-white">{u.fullName}</p>

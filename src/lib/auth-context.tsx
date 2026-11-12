@@ -75,14 +75,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!saved) return INITIAL_USERS;
     try {
       const parsed: JavenlyUser[] = JSON.parse(saved);
-      // Ensure default administrators exist
-      const merged = [...parsed];
+      // Strip any fake mock accounts from localStorage
+      const fakeEmails = [
+        'marcus.chen@javenly.com',
+        'sarah.jenkins@javenly.com',
+        'elena.rostova@gmail.com',
+        'david.kim@outlook.com',
+        'amanda.foster@icloud.com'
+      ];
+      const cleaned = parsed.filter(u => !fakeEmails.includes(u.email.toLowerCase()));
+      // Ensure primary administrator exists
       INITIAL_USERS.forEach(initU => {
-        if (!merged.some(u => u.email.toLowerCase() === initU.email.toLowerCase())) {
-          merged.unshift(initU);
+        if (!cleaned.some(u => u.email.toLowerCase() === initU.email.toLowerCase())) {
+          cleaned.unshift(initU);
         }
       });
-      return merged;
+      return cleaned;
     } catch {
       return INITIAL_USERS;
     }
