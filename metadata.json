@@ -1,0 +1,6 @@
+{
+  "name": "Javenly Identity — Centralized Authentication Platform",
+  "description": "Enterprise-grade, $0/month centralized identity & single sign-on platform for Javenly Innovations powered by Supabase Auth, Cloudflare Pages, and standard OAuth 2.1/OIDC PKCE.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
