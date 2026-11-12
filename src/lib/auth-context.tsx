@@ -35,6 +35,7 @@ interface AuthContextType {
   setPendingOAuthRequest: (req: PKCEAuthRequest | null) => void;
   
   // Auth actions
+  setCurrentUser: (user: JavenlyUser | null) => void;
   loginWithEmail: (email: string, password?: string) => Promise<{ success: boolean; error?: string }>;
   loginWithMagicLink: (email: string) => Promise<{ success: boolean; message: string }>;
   signup: (email: string, password: string, fullName: string, username: string) => Promise<{ success: boolean; error?: string }>;
@@ -97,9 +98,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
 
   const [currentUser, setCurrentUser] = useState<JavenlyUser | null>(() => {
-    const savedId = localStorage.getItem('javenly_current_user_id');
-    const user = users.find(u => u.id === savedId) || users[0];
-    return user || null;
+    const saved = localStorage.getItem('javenly_logged_user');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return null;
+      }
+    }
+    return null;
   });
 
   const [applications, setApplications] = useState<OAuthApplication[]>(() => {
@@ -192,18 +199,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: false, error: 'This account has been suspended by an administrator. Please contact security@javenly.com.' };
     }
 
-    // Try real Supabase call if configured with a live custom backend
-    if (supabaseConfig.isCustom && password) {
-      try {
-        const client = getSupabaseClient();
-        const { error } = await client.auth.signInWithPassword({ email: normalizedEmail, password });
-        if (error) {
-          addAuditLog('auth.login.failed', email, `Supabase Auth error: ${error.message}`, 'warning');
-          return { success: false, error: error.message };
-        }
-      } catch (err: any) {
-        // Fallback to internal directory if offline/demo
+    if (!password) {
+      return { success: false, error: 'Password is required.' };
+    }
+
+    try {
+      const client = getSupabaseClient();
+      const { error } = await client.auth.signInWithPassword({ email: normalizedEmail, password });
+      if (error) {
+        addAuditLog('auth.login.failed', email, `Supabase Auth error: ${error.message}`, 'warning');
+        return { success: false, error: error.message };
       }
+    } catch (err: any) {
+      addAuditLog('auth.login.failed', email, `Authentication error: ${err.message}`, 'warning');
+      return { success: false, error: err.message || 'Authentication failed.' };
     }
 
     // Successful login
@@ -442,6 +451,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         currentUser,
+        setCurrentUser,
         users,
         sessions,
         applications,

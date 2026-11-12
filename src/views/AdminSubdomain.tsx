@@ -29,11 +29,12 @@ import {
 
 interface AdminSubdomainProps {
   onBack?: () => void;
+  currentUser?: any | null;
 }
 
-export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
+export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack, currentUser: propUser }) => {
   const { 
-    currentUser, 
+    currentUser: contextUser, 
     users, 
     applications, 
     auditLogs, 
@@ -46,6 +47,15 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
     supabaseConfig
   } = useAuth();
 
+  const currentUser = propUser || contextUser || (() => {
+    try {
+      const saved = localStorage.getItem('javenly_logged_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  })();
+
   const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'apps' | 'audit' | 'config'>('overview');
   
   // User search/filter & live Supabase profiles sync
@@ -53,6 +63,24 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
   const [selectedUserDetail, setSelectedUserDetail] = useState<any | null>(null);
   const [supabaseUsers, setSupabaseUsers] = useState<any[]>([]);
   const [isSyncingSupabase, setIsSyncingSupabase] = useState(false);
+
+  const [statusOverrides, setStatusOverrides] = useState<Record<string, 'active' | 'suspended'>>(() => {
+    try {
+      const saved = localStorage.getItem('javenly_user_status_overrides');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const [deletedUserIds, setDeletedUserIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('javenly_deleted_user_ids');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   const syncSupabaseProfiles = async () => {
     setIsSyncingSupabase(true);
@@ -73,6 +101,63 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
     syncSupabaseProfiles();
   }, []);
 
+  const handleToggleStatus = async (targetUser: any) => {
+    const newStatus: 'active' | 'suspended' = targetUser.status === 'active' ? 'suspended' : 'active';
+    
+    // 1. Update statusOverrides in state & localStorage
+    setStatusOverrides(prev => {
+      const updated = { 
+        ...prev, 
+        [targetUser.id]: newStatus, 
+        [targetUser.email.toLowerCase()]: newStatus 
+      };
+      localStorage.setItem('javenly_user_status_overrides', JSON.stringify(updated));
+      return updated;
+    });
+
+    // 2. Also call directory toggleUserStatus
+    toggleUserStatus(targetUser.id, newStatus);
+
+    // 3. Persist to Supabase profiles table
+    try {
+      const client = getSupabaseClient();
+      await client.from('profiles').update({ status: newStatus }).eq('id', targetUser.id);
+    } catch (err) {
+      console.warn('Supabase status update notice:', err);
+    }
+  };
+
+  const handleDeleteUser = async (targetUser: any) => {
+    if (!window.confirm(`Are you sure you want to permanently delete user ${targetUser.email}?`)) {
+      return;
+    }
+
+    // 1. Add to deletedUserIds in state & localStorage
+    setDeletedUserIds(prev => {
+      const updated = [...prev, targetUser.id, targetUser.email.toLowerCase()];
+      localStorage.setItem('javenly_deleted_user_ids', JSON.stringify(updated));
+      return updated;
+    });
+
+    // 2. Remove from supabaseUsers state
+    setSupabaseUsers(prev => prev.filter(u => u.id !== targetUser.id && u.email?.toLowerCase() !== targetUser.email.toLowerCase()));
+    
+    // 3. Remove from directory users
+    adminDeleteUser(targetUser.id);
+
+    // 4. Delete from Supabase profiles table
+    try {
+      const client = getSupabaseClient();
+      await client.from('profiles').delete().eq('id', targetUser.id);
+    } catch (err) {
+      console.warn('Supabase profile deletion notice:', err);
+    }
+
+    if (selectedUserDetail?.id === targetUser.id) {
+      setSelectedUserDetail(null);
+    }
+  };
+
   // App create modal
   const [showCreateAppModal, setShowCreateAppModal] = useState(false);
   const [newAppName, setNewAppName] = useState('');
@@ -87,14 +172,14 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
   const [auditFilter, setAuditFilter] = useState('all');
   const [auditSearch, setAuditSearch] = useState('');
 
-  // Access check: admins or Javenly Innovations account
+  // Access check: only verified administrators
   const isAdmin = Boolean(
     currentUser && (
       currentUser.role === 'admin' || 
       currentUser.role === 'super_admin' || 
       (currentUser.role as string) === 'Administrator' ||
-      currentUser.email?.toLowerCase().includes('admin') ||
-      currentUser.email?.toLowerCase().includes('business')
+      currentUser.email?.toLowerCase() === 'admin@javenly.com' ||
+      currentUser.email?.toLowerCase() === 'business@javenly.com'
     )
   );
 
@@ -104,23 +189,8 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
         <ShieldAlert className="w-12 h-12 text-rose-400 mx-auto mb-3" />
         <h2 className="text-xl font-bold">Administrative Access Restricted</h2>
         <p className="text-xs text-slate-400 mt-2 mb-6 leading-relaxed">
-          The <code className="text-sky-300">admin-identity.javenly.com</code> portal requires Javenly Administrator credentials (<code className="text-white">admin@javenly.com</code> or <code className="text-white">business@javenly.com</code>).
+          The <code className="text-sky-300">admin-identity.javenly.com</code> portal requires verified Javenly Administrator credentials. Please log in with an administrator account.
         </p>
-        <div className="p-4 bg-slate-900 rounded-xl border border-slate-800 text-xs text-slate-300 mb-6 text-left space-y-3">
-          <p className="font-semibold text-white">Log in as Administrator:</p>
-          <button
-            onClick={() => switchUser('usr_jav_innovations_root_admin')}
-            className="w-full py-2.5 px-3 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow transition-all cursor-pointer"
-          >
-            Authenticate as Javenly Innovations (admin@javenly.com)
-          </button>
-          <button
-            onClick={() => switchUser('usr_jav_business_root_admin')}
-            className="w-full py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-all cursor-pointer"
-          >
-            Authenticate as Business Operations (business@javenly.com)
-          </button>
-        </div>
         {onBack && (
           <button
             onClick={onBack}
@@ -138,11 +208,15 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
   const allDisplayUsers = useMemo(() => {
     const map = new Map<string, any>();
     // 1. Add directory users
-    users.forEach(u => map.set(u.email.toLowerCase(), u));
+    users.forEach(u => {
+      const status = statusOverrides[u.id] || statusOverrides[u.email.toLowerCase()] || u.status || 'active';
+      map.set(u.email.toLowerCase(), { ...u, status });
+    });
     // 2. Add or merge live Supabase profile users
     supabaseUsers.forEach(p => {
       if (p.email) {
         const existing = map.get(p.email.toLowerCase());
+        const status = statusOverrides[p.id] || statusOverrides[p.email.toLowerCase()] || p.status || existing?.status || 'active';
         map.set(p.email.toLowerCase(), {
           id: p.id || existing?.id || `usr_jav_${Math.random().toString(36).substring(2, 9)}`,
           email: p.email,
@@ -153,19 +227,25 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
           jobTitle: p.job_title || existing?.jobTitle || 'Member',
           department: p.department || existing?.department || 'Customer Community',
           company: p.company || existing?.company || 'Javenly Innovations',
-          role: (p.role === 'Administrator' || p.role === 'admin' || p.role === 'super_admin' || p.email.includes('admin') || p.email.includes('business')) ? 'super_admin' : 'user',
+          role: (p.role === 'Administrator' || p.role === 'admin' || p.role === 'super_admin') ? 'super_admin' : 'user',
           emailVerified: true,
           mfaEnabled: false,
           createdAt: p.created_at || existing?.createdAt || new Date().toISOString(),
           lastLoginAt: existing?.lastLoginAt || new Date().toISOString(),
-          status: 'active',
+          status: status,
           metadata: p.metadata || existing?.metadata || {},
         });
       }
     });
     const fakeEmails = ['marcus.chen@javenly.com', 'sarah.jenkins@javenly.com', 'elena.rostova@gmail.com', 'david.kim@outlook.com', 'amanda.foster@icloud.com'];
-    return Array.from(map.values()).filter(u => !fakeEmails.includes(u.email?.toLowerCase()));
-  }, [users, supabaseUsers]);
+    return Array.from(map.values()).filter(u => {
+      const emailLower = u.email?.toLowerCase();
+      if (!emailLower) return false;
+      if (fakeEmails.includes(emailLower)) return false;
+      if (deletedUserIds.includes(u.id) || deletedUserIds.includes(emailLower)) return false;
+      return true;
+    });
+  }, [users, supabaseUsers, statusOverrides, deletedUserIds]);
 
   const filteredUsers = allDisplayUsers.filter(u => 
     u.fullName.toLowerCase().includes(userSearch.toLowerCase()) ||
@@ -443,7 +523,7 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
                           <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 text-xs font-bold text-sky-400">
-                            {u.email.toLowerCase().includes('admin') || u.email.toLowerCase().includes('business') ? (
+                            {u.role === 'super_admin' ? (
                               <img src="/assets/aistudio/Gemini_Generated_Image_5xfn6o5xfn6o5xfn-removebg-preview__1__46f6d8c3.png" alt="" className="w-5 h-5 object-contain" />
                             ) : (
                               <span>{(u.fullName || u.email || 'U').substring(0, 2).toUpperCase()}</span>
@@ -496,17 +576,27 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
                         >
                           Details
                         </button>
-                        {u.id !== currentUser?.id && (
-                          <button
-                            onClick={() => toggleUserStatus(u.id, u.status === 'active' ? 'suspended' : 'active')}
-                            className={`px-2 py-1 rounded text-[11px] font-medium ${
-                              u.status === 'active' 
-                                ? 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20' 
-                                : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
-                            }`}
-                          >
-                            {u.status === 'active' ? 'Suspend' : 'Activate'}
-                          </button>
+                        {u.id !== currentUser?.id && u.email?.toLowerCase() !== currentUser?.email?.toLowerCase() && (
+                          <>
+                            <button
+                              onClick={() => handleToggleStatus(u)}
+                              className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                                u.status === 'active' 
+                                  ? 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20' 
+                                  : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+                              }`}
+                            >
+                              {u.status === 'active' ? 'Suspend' : 'Activate'}
+                            </button>
+                            <button
+                              onClick={() => handleDeleteUser(u)}
+                              className="px-2 py-1 rounded text-[11px] font-medium bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-colors cursor-pointer flex items-center gap-1"
+                              title="Permanently Delete User"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Delete</span>
+                            </button>
+                          </>
                         )}
                       </div>
                     </td>
@@ -966,13 +1056,11 @@ export const AdminSubdomain: React.FC<AdminSubdomainProps> = ({ onBack }) => {
               <div className="flex justify-between items-center pt-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    adminDeleteUser(selectedUserDetail.id);
-                    setSelectedUserDetail(null);
-                  }}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-rose-400 hover:bg-rose-500/10"
+                  onClick={() => handleDeleteUser(selectedUserDetail)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-rose-400 hover:bg-rose-500/10 flex items-center gap-1.5 cursor-pointer"
                 >
-                  Delete Identity
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete Identity</span>
                 </button>
                 <button
                   type="button"

@@ -406,20 +406,6 @@ export const IdentitySubdomain: React.FC = () => {
                 </div>
               </div>
 
-              {/* Demo quick fill button */}
-              <div className="pt-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEmail('admin@javenly.com');
-                    setPassword('Javenly2025Secure!');
-                  }}
-                  className="text-[11px] text-slate-400 hover:text-sky-400 underline"
-                >
-                  ⚡ Autofill Administrator (Javenly Innovations)
-                </button>
-              </div>
-
               <button
                 type="submit"
                 disabled={loading}

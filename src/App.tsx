@@ -13,19 +13,14 @@ import {
   Copy,
   Check,
   ShieldCheck,
-  Shield
+  Shield,
+  Database,
+  Lock
 } from 'lucide-react';
-import { getSupabaseClient, getSupabaseConfig } from './lib/supabase';
+import { getSupabaseClient, getSupabaseConfig, resetSupabaseClient } from './lib/supabase';
 import { AdminSubdomain } from './views/AdminSubdomain';
 import { useAuth } from './lib/auth-context';
-
-interface JavenlyUser {
-  id: string;
-  email: string;
-  fullName: string;
-  role: string;
-  createdAt: string;
-}
+import { JavenlyUser } from './types';
 
 interface OAuthRequest {
   clientId: string;
@@ -39,12 +34,18 @@ interface OAuthRequest {
 }
 
 export default function App() {
-  const { switchUser, logout: authLogout } = useAuth();
+  const { setCurrentUser: setContextUser, logout: authLogout } = useAuth();
   const [currentView, setCurrentView] = useState<'login' | 'admin'>('login');
   const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'forgot' | 'new_password'>('signin');
   const [showPassword, setShowPassword] = useState(false);
   const [showDbErrorModal, setShowDbErrorModal] = useState(false);
+  const [showSchemaErrorModal, setShowSchemaErrorModal] = useState(false);
+  const [showConfigModal, setShowConfigModal] = useState(false);
   const [copiedFixSql, setCopiedFixSql] = useState(false);
+  const [copiedSchemaFixSql, setCopiedSchemaFixSql] = useState(false);
+  const [copiedFullSql, setCopiedFullSql] = useState(false);
+  const [customUrl, setCustomUrl] = useState(() => localStorage.getItem('javenly_supabase_url') || '');
+  const [customKey, setCustomKey] = useState(() => localStorage.getItem('javenly_supabase_anon_key') || '');
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -70,10 +71,12 @@ export default function App() {
   useEffect(() => {
     if (currentUser) {
       localStorage.setItem('javenly_logged_user', JSON.stringify(currentUser));
+      setContextUser(currentUser);
     } else {
       localStorage.removeItem('javenly_logged_user');
+      setContextUser(null);
     }
-  }, [currentUser]);
+  }, [currentUser, setContextUser]);
 
   // Check URL query parameters for OAuth 2.1 authorization request or password recovery token
   useEffect(() => {
@@ -122,155 +125,149 @@ export default function App() {
     }
   }, []);
 
-  // Handle Log In
+  // Handle Log In - strictly verified via Supabase Auth
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setMessage(null);
 
-    const normalizedEmail = (email.trim() || 'business@javenly.com').toLowerCase();
+    const normalizedEmail = email.trim().toLowerCase();
 
-    if (supabaseConfig.isCustom) {
-      try {
-        const client = getSupabaseClient();
-        const { data, error } = await client.auth.signInWithPassword({
-          email: normalizedEmail,
-          password: password,
-        });
-
-        if (error) {
-          const isAdminEmail = (normalizedEmail === 'admin@javenly.com' || normalizedEmail === 'business@javenly.com');
-          const isInvalidCreds = error.message.toLowerCase().includes('invalid login credentials');
-
-          if (isAdminEmail && isInvalidCreds) {
-            try {
-              // Automatically provision administrator in their Supabase project
-              const { data: signUpData, error: signUpError } = await client.auth.signUp({
-                email: normalizedEmail,
-                password: password || 'Javenly2025Secure!',
-                options: {
-                  data: {
-                    full_name: 'Javenly Innovations',
-                    role: 'Administrator',
-                    company: 'Javenly Innovations',
-                  },
-                },
-              });
-
-              if (!signUpError && signUpData.user) {
-                try {
-                  await client.from('profiles').upsert({
-                    id: signUpData.user.id,
-                    email: normalizedEmail,
-                    full_name: 'Javenly Innovations',
-                    role: 'Administrator',
-                    company: 'Javenly Innovations',
-                  });
-                } catch (pErr) {
-                  console.warn('Profile sync notice:', pErr);
-                }
-
-                const adminUser: JavenlyUser = {
-                  id: signUpData.user.id,
-                  email: normalizedEmail,
-                  fullName: 'Javenly Innovations',
-                  role: 'Administrator',
-                  createdAt: signUpData.user.created_at || new Date().toISOString(),
-                };
-                if (normalizedEmail === 'business@javenly.com') {
-                  switchUser('usr_jav_business_root_admin');
-                } else {
-                  switchUser('usr_jav_innovations_root_admin');
-                }
-                setCurrentUser(adminUser);
-                setLoading(false);
-                setMessage({ type: 'success', text: 'Welcome back, Javenly Innovations!' });
-                return;
-              }
-            } catch (autoErr) {
-              console.warn('Admin auto-provisioning notice:', autoErr);
-            }
-
-            // If Supabase requires email verification or throws trigger error, log in to administrator session:
-            const adminUser: JavenlyUser = {
-              id: 'usr_jav_innovations_root_admin',
-              email: normalizedEmail,
-              fullName: 'Javenly Innovations',
-              role: 'Administrator',
-              createdAt: '2024-01-01T00:00:00Z',
-            };
-            if (normalizedEmail === 'business@javenly.com') {
-              switchUser('usr_jav_business_root_admin');
-            } else {
-              switchUser('usr_jav_innovations_root_admin');
-            }
-            setCurrentUser(adminUser);
-            setLoading(false);
-            setMessage({ type: 'success', text: 'Logged in as Administrator (Javenly Innovations)!' });
-            return;
-          }
-
-          setLoading(false);
-          if (isInvalidCreds) {
-            setMessage({ type: 'error', text: 'Invalid login credentials. If you haven\'t created an account yet, click Register below.' });
-          } else {
-            setMessage({ type: 'error', text: error.message });
-          }
-          return;
-        }
-
-        if (data.user) {
-          try {
-            await client.from('profiles').upsert({
-              id: data.user.id,
-              email: normalizedEmail,
-              full_name: data.user.user_metadata?.full_name || (normalizedEmail === 'admin@javenly.com' || normalizedEmail === 'business@javenly.com' ? 'Javenly Innovations' : 'Javenly Member'),
-              role: normalizedEmail === 'admin@javenly.com' || normalizedEmail === 'business@javenly.com' ? 'Administrator' : 'Member',
-              company: 'Javenly Innovations',
-            });
-          } catch (profileErr) {
-            console.warn('Profile sync:', profileErr);
-          }
-
-          const user: JavenlyUser = {
-            id: data.user.id,
-            email: data.user.email || normalizedEmail,
-            fullName: data.user.user_metadata?.full_name || (normalizedEmail === 'admin@javenly.com' || normalizedEmail === 'business@javenly.com' ? 'Javenly Innovations' : 'Javenly Member'),
-            role: normalizedEmail === 'admin@javenly.com' || normalizedEmail === 'business@javenly.com' ? 'Administrator' : 'Member',
-            createdAt: data.user.created_at || new Date().toISOString(),
-          };
-          setCurrentUser(user);
-          setLoading(false);
-          return;
-        }
-      } catch (err: any) {
-        setLoading(false);
-        setMessage({ type: 'error', text: err.message || 'Error communicating with server.' });
-        return;
-      }
+    if (!normalizedEmail) {
+      setLoading(false);
+      setMessage({ type: 'error', text: 'Please enter your email address.' });
+      return;
     }
 
-    // Default fast login
-    setTimeout(() => {
+    if (!password) {
       setLoading(false);
-      const isAdminEmail = (normalizedEmail === 'admin@javenly.com' || normalizedEmail === 'business@javenly.com');
-      if (isAdminEmail) {
-        if (normalizedEmail === 'business@javenly.com') {
-          switchUser('usr_jav_business_root_admin');
-        } else {
-          switchUser('usr_jav_innovations_root_admin');
-        }
-      }
-      const adminUser: JavenlyUser = {
-        id: 'usr_jav_innovations_root_admin',
+      setMessage({ type: 'error', text: 'Please enter your password.' });
+      return;
+    }
+
+    try {
+      const client = getSupabaseClient();
+      const { data, error } = await client.auth.signInWithPassword({
         email: normalizedEmail,
-        fullName: 'Javenly Innovations',
-        role: 'Administrator',
-        createdAt: '2024-01-01T00:00:00Z',
-      };
-      setCurrentUser(adminUser);
-      setMessage({ type: 'success', text: 'Welcome back to Javenly Innovations!' });
-    }, 450);
+        password: password,
+      });
+
+      if (error) {
+        setLoading(false);
+        if (error.message.toLowerCase().includes('querying schema')) {
+          setShowSchemaErrorModal(true);
+          return;
+        }
+        setMessage({ type: 'error', text: error.message || 'Invalid login credentials.' });
+        return;
+      }
+
+      if (data?.user) {
+        // Fetch role from profiles table in Supabase
+        let resolvedRole: 'super_admin' | 'admin' | 'developer' | 'user' = 'user';
+        let resolvedFullName = data.user.user_metadata?.full_name || 'Javenly User';
+        let profileRole: string | undefined = undefined;
+        let profileStatus: string | undefined = undefined;
+
+        try {
+          const { data: profile } = await client
+            .from('profiles')
+            .select('role, full_name, status')
+            .eq('id', data.user.id)
+            .single();
+
+          if (profile?.role) {
+            profileRole = profile.role;
+            if (profile.role === 'Administrator' || profile.role === 'admin' || profile.role === 'super_admin') {
+              resolvedRole = 'super_admin';
+            }
+          }
+          if (profile?.full_name) {
+            resolvedFullName = profile.full_name;
+          }
+          if ((profile as any)?.status) {
+            profileStatus = (profile as any).status;
+          }
+        } catch (profileErr) {
+          console.warn('Profile fetch notice:', profileErr);
+        }
+
+        // If verified by Supabase and account is designated administrator
+        if (
+          normalizedEmail === 'admin@javenly.com' ||
+          normalizedEmail === 'business@javenly.com' ||
+          data.user.user_metadata?.role === 'Administrator' ||
+          data.user.user_metadata?.role === 'admin' ||
+          profileRole === 'Administrator' ||
+          profileRole === 'admin' ||
+          profileRole === 'super_admin'
+        ) {
+          resolvedRole = 'super_admin';
+          resolvedFullName = resolvedFullName === 'Javenly User' ? 'Javenly Innovations' : resolvedFullName;
+        }
+
+        // Check if user is suspended or deleted by admin
+        const statusOverrides: Record<string, string> = (() => {
+          try {
+            const saved = localStorage.getItem('javenly_user_status_overrides');
+            return saved ? JSON.parse(saved) : {};
+          } catch {
+            return {};
+          }
+        })();
+
+        const deletedUserIds: string[] = (() => {
+          try {
+            const saved = localStorage.getItem('javenly_deleted_user_ids');
+            return saved ? JSON.parse(saved) : [];
+          } catch {
+            return [];
+          }
+        })();
+
+        if (deletedUserIds.includes(data.user.id) || deletedUserIds.includes(normalizedEmail)) {
+          setLoading(false);
+          setMessage({ type: 'error', text: 'This account has been deleted by an administrator.' });
+          return;
+        }
+
+        const userStatus = statusOverrides[data.user.id] || statusOverrides[normalizedEmail] || profileStatus || 'active';
+        if (userStatus === 'suspended') {
+          setLoading(false);
+          setMessage({ type: 'error', text: 'This account has been suspended by an administrator. Please contact security@javenly.com.' });
+          return;
+        }
+
+        const user: JavenlyUser = {
+          id: data.user.id,
+          email: data.user.email || normalizedEmail,
+          fullName: resolvedFullName,
+          username: normalizedEmail.split('@')[0],
+          avatarUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200&auto=format&fit=crop&q=80',
+          role: resolvedRole,
+          company: 'Javenly Innovations',
+          emailVerified: true,
+          mfaEnabled: false,
+          createdAt: data.user.created_at || new Date().toISOString(),
+          lastLoginAt: new Date().toISOString(),
+          status: userStatus as 'active' | 'suspended',
+          metadata: {},
+        };
+
+        setCurrentUser(user);
+        setContextUser(user);
+        localStorage.setItem('javenly_logged_user', JSON.stringify(user));
+        setLoading(false);
+        setMessage({ type: 'success', text: `Welcome back, ${resolvedFullName}!` });
+        return;
+      }
+
+      setLoading(false);
+      setMessage({ type: 'error', text: 'Invalid login credentials.' });
+    } catch (err: any) {
+      setLoading(false);
+      setMessage({ type: 'error', text: err.message || 'Error communicating with Supabase.' });
+    }
   };
 
   // Handle Registration
@@ -293,130 +290,100 @@ export default function App() {
       return;
     }
 
-    if (supabaseConfig.isCustom) {
-      try {
-        const client = getSupabaseClient();
-        const { data, error } = await client.auth.signUp({
-          email: normalizedEmail,
-          password: password,
-          options: {
-            data: {
-              full_name: fullName.trim() || 'Javenly Member',
-              role: 'Member',
-              company: 'Javenly Innovations',
-            },
+    try {
+      const client = getSupabaseClient();
+      const { data, error } = await client.auth.signUp({
+        email: normalizedEmail,
+        password: password,
+        options: {
+          data: {
+            full_name: fullName.trim() || 'Javenly Member',
+            role: 'Member',
+            company: 'Javenly Innovations',
           },
-        });
+        },
+      });
 
-        if (error) {
-          setLoading(false);
-          if (error.message.includes('Database error saving new user')) {
-            setShowDbErrorModal(true);
-            return;
-          }
-          setMessage({ type: 'error', text: error.message });
-          return;
-        }
-
-        if (data.user) {
-          try {
-            await client.from('profiles').upsert({
-              id: data.user.id,
-              email: normalizedEmail,
-              full_name: fullName.trim() || 'Javenly Member',
-              role: 'Member',
-              company: 'Javenly Innovations',
-            });
-          } catch (profileErr) {
-            console.warn('Profile sync on signup:', profileErr);
-          }
-
-          setLoading(false);
-          if (data.session) {
-            const user: JavenlyUser = {
-              id: data.user.id,
-              email: data.user.email || normalizedEmail,
-              fullName: fullName.trim() || 'Javenly Member',
-              role: 'Member',
-              createdAt: data.user.created_at || new Date().toISOString(),
-            };
-            setCurrentUser(user);
-            setMessage({ type: 'success', text: 'Account registered successfully!' });
-          } else {
-            setMessage({ 
-              type: 'success', 
-              text: 'Account registered! Please check your email if confirmation is required.' 
-            });
-          }
-          return;
-        }
-      } catch (err: any) {
+      if (error) {
         setLoading(false);
-        setMessage({ type: 'error', text: err.message || 'Error registering account.' });
+        if (error.message.includes('Database error saving new user')) {
+          setShowDbErrorModal(true);
+          return;
+        }
+        setMessage({ type: 'error', text: error.message });
         return;
       }
-    }
 
-    // Default fast registration
-    setTimeout(() => {
       setLoading(false);
-      const newUser: JavenlyUser = {
-        id: `usr_jav_${Math.random().toString(36).substring(2, 10)}`,
-        email: normalizedEmail,
-        fullName: fullName.trim() || 'Javenly Member',
-        role: 'Member',
-        createdAt: new Date().toISOString(),
-      };
-      setCurrentUser(newUser);
-      setMessage({ type: 'success', text: 'Account registered successfully!' });
-    }, 450);
+      if (data?.session && data?.user) {
+        const user: JavenlyUser = {
+          id: data.user.id,
+          email: data.user.email || normalizedEmail,
+          fullName: fullName.trim() || 'Javenly Member',
+          username: normalizedEmail.split('@')[0],
+          avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80',
+          role: 'user',
+          company: 'Javenly Innovations',
+          emailVerified: false,
+          mfaEnabled: false,
+          createdAt: data.user.created_at || new Date().toISOString(),
+          lastLoginAt: new Date().toISOString(),
+          status: 'active',
+          metadata: {},
+        };
+        setCurrentUser(user);
+        setContextUser(user);
+        setMessage({ type: 'success', text: 'Account registered successfully!' });
+      } else {
+        setMessage({ 
+          type: 'success', 
+          text: 'Account created! Please check your email to confirm your account, then log in.' 
+        });
+        setAuthMode('signin');
+      }
+    } catch (err: any) {
+      setLoading(false);
+      setMessage({ type: 'error', text: err.message || 'Error communicating with Supabase.' });
+    }
   };
 
-  // Real Password Reset Request (Dispatches password recovery email)
+  // Real Password Reset Request (Dispatches password recovery email via Supabase)
   const handleRequestPasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setMessage(null);
 
-    const targetEmail = (email.trim() || 'business@javenly.com').toLowerCase();
-
-    if (supabaseConfig.isCustom) {
-      try {
-        const client = getSupabaseClient();
-        const { error } = await client.auth.resetPasswordForEmail(targetEmail, {
-          redirectTo: window.location.origin,
-        });
-
-        if (error) {
-          setLoading(false);
-          setMessage({ type: 'error', text: error.message });
-          return;
-        }
-
-        setLoading(false);
-        setMessage({
-          type: 'success',
-          text: `A password reset link has been dispatched to ${targetEmail}. Please check your inbox and spam folder.`,
-        });
-        return;
-      } catch (err: any) {
-        setLoading(false);
-        setMessage({ type: 'error', text: err.message || 'Error requesting password reset.' });
-        return;
-      }
+    const targetEmail = email.trim().toLowerCase();
+    if (!targetEmail) {
+      setLoading(false);
+      setMessage({ type: 'error', text: 'Please enter your email address.' });
+      return;
     }
 
-    // Fast simulation
-    setTimeout(() => {
+    try {
+      const client = getSupabaseClient();
+      const { error } = await client.auth.resetPasswordForEmail(targetEmail, {
+        redirectTo: window.location.origin,
+      });
+
+      if (error) {
+        setLoading(false);
+        setMessage({ type: 'error', text: error.message });
+        return;
+      }
+
       setLoading(false);
       setMessage({
         type: 'success',
-        text: `A password reset link has been dispatched to ${targetEmail}. Please check your inbox.`,
+        text: `A password reset link has been dispatched to ${targetEmail}. Please check your inbox and spam folder.`,
       });
-    }, 500);
+    } catch (err: any) {
+      setLoading(false);
+      setMessage({ type: 'error', text: err.message || 'Error communicating with Supabase.' });
+    }
   };
 
-  // Set New Password (After clicking recovery link or direct update)
+  // Set New Password via Supabase Auth
   const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -434,42 +401,28 @@ export default function App() {
       return;
     }
 
-    if (supabaseConfig.isCustom) {
-      try {
-        const client = getSupabaseClient();
-        const { error } = await client.auth.updateUser({
-          password: newPassword,
-        });
+    try {
+      const client = getSupabaseClient();
+      const { error } = await client.auth.updateUser({
+        password: newPassword,
+      });
 
-        if (error) {
-          setLoading(false);
-          setMessage({ type: 'error', text: error.message });
-          return;
-        }
-
+      if (error) {
         setLoading(false);
-        setMessage({ type: 'success', text: 'Your password has been updated successfully! You can now log in.' });
-        setAuthMode('signin');
-        setPassword('');
-        setNewPassword('');
-        setConfirmPassword('');
-        return;
-      } catch (err: any) {
-        setLoading(false);
-        setMessage({ type: 'error', text: err.message || 'Error updating password.' });
+        setMessage({ type: 'error', text: error.message });
         return;
       }
-    }
 
-    // Fast simulation
-    setTimeout(() => {
       setLoading(false);
       setMessage({ type: 'success', text: 'Your password has been updated successfully! You can now log in.' });
       setAuthMode('signin');
       setPassword('');
       setNewPassword('');
       setConfirmPassword('');
-    }, 450);
+    } catch (err: any) {
+      setLoading(false);
+      setMessage({ type: 'error', text: err.message || 'Error communicating with Supabase.' });
+    }
   };
 
   // OAuth 2.1 Consent Actions
@@ -486,20 +439,21 @@ export default function App() {
     window.location.href = callbackUrl;
   };
 
+  // Verified admin role or designated administrator accounts
   const isAdminUser = Boolean(
     currentUser && (
-      currentUser.role === 'Administrator' ||
-      currentUser.role === 'admin' ||
       currentUser.role === 'super_admin' ||
-      currentUser.email?.toLowerCase().includes('admin') ||
-      currentUser.email?.toLowerCase().includes('business')
+      currentUser.role === 'admin' ||
+      (currentUser.role as string) === 'Administrator' ||
+      currentUser.email?.toLowerCase() === 'admin@javenly.com' ||
+      currentUser.email?.toLowerCase() === 'business@javenly.com'
     )
   );
 
   if (currentView === 'admin' && isAdminUser) {
     return (
       <div className="min-h-screen bg-[#070b14] text-slate-100 selection:bg-sky-500 selection:text-white">
-        <AdminSubdomain onBack={() => setCurrentView('login')} />
+        <AdminSubdomain onBack={() => setCurrentView('login')} currentUser={currentUser} />
       </div>
     );
   }
@@ -585,15 +539,10 @@ export default function App() {
 
             <div className="space-y-2.5">
               {/* Admin Dashboard Action for Administrators */}
-              {(currentUser.role === 'Administrator' || currentUser.role === 'admin' || currentUser.role === 'super_admin' || currentUser.email.toLowerCase().includes('admin') || currentUser.email.toLowerCase().includes('business')) && (
+              {isAdminUser && (
                 <button
                   type="button"
                   onClick={() => {
-                    if (currentUser.email.toLowerCase().includes('business')) {
-                      switchUser('usr_jav_business_root_admin');
-                    } else {
-                      switchUser('usr_jav_innovations_root_admin');
-                    }
                     setCurrentView('admin');
                   }}
                   className="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors flex items-center justify-center gap-2 shadow cursor-pointer border border-slate-700"
@@ -932,8 +881,8 @@ export default function App() {
             </div>
           )}
 
-          {/* Back to Javenly Innovations */}
-          <div className="mt-4 flex items-center justify-center text-xs text-slate-400">
+          {/* Back to Javenly Innovations & Supabase Backend */}
+          <div className="mt-4 flex items-center justify-center gap-3 text-xs text-slate-400">
             <a
               href="https://javenly.com"
               target="_blank"
@@ -943,6 +892,15 @@ export default function App() {
               <span>←</span>
               <span>Back to Javenly Innovations</span>
             </a>
+            <span className="text-slate-600">•</span>
+            <button
+              type="button"
+              onClick={() => setShowConfigModal(true)}
+              className="hover:text-sky-300 transition-colors inline-flex items-center gap-1.5 cursor-pointer text-slate-400"
+            >
+              <Database className="w-3.5 h-3.5 text-sky-400" />
+              <span>Supabase Backend</span>
+            </button>
           </div>
         </div>
 
@@ -976,7 +934,7 @@ export default function App() {
 
             <div className="py-4 space-y-4 text-xs">
               <p className="text-slate-600 leading-relaxed">
-                This error happens when an old or incomplete database trigger attached to <code>auth.users</code> encounters an error during signup.
+                This error happens when the database trigger attached to <code>auth.users</code> encounters an error during signup. Running the script below in your Supabase SQL Editor fixes it permanently.
               </p>
 
               {/* 1-Click Copy SQL Fix */}
@@ -996,8 +954,8 @@ begin
   values (
     new.id,
     new.email,
-    coalesce(new.raw_user_meta_data->>'full_name', 'Javenly Member'),
-    case when new.email = 'admin@javenly.com' or new.email = 'business@javenly.com' then 'Administrator' else 'Member' end,
+    coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)),
+    case when lower(new.email) in ('admin@javenly.com', 'business@javenly.com') then 'Administrator' else 'Member' end,
     'Javenly Innovations'
   )
   on conflict (id) do update set
@@ -1027,31 +985,6 @@ create trigger on_auth_user_created
                 </p>
               </div>
 
-              {/* Direct Bypass button so user is never stuck */}
-              <div className="p-3 bg-blue-50/70 border border-blue-100 rounded-xl space-y-2">
-                <p className="font-bold text-slate-900">
-                  ⚡ Want to finish registration and log in immediately?
-                </p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const fallbackUser: JavenlyUser = {
-                      id: `usr_jav_${Math.random().toString(36).substring(2, 10)}`,
-                      email: (email.trim() || 'business@javenly.com').toLowerCase(),
-                      fullName: fullName.trim() || 'Javenly Innovations',
-                      role: (email.trim() === 'admin@javenly.com' || email.trim() === 'business@javenly.com') ? 'Administrator' : 'Member',
-                      createdAt: new Date().toISOString(),
-                    };
-                    setCurrentUser(fallbackUser);
-                    setShowDbErrorModal(false);
-                    setMessage({ type: 'success', text: 'Registration completed successfully!' });
-                  }}
-                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-[#cb475b] hover:bg-[#ba3d50] shadow transition-colors cursor-pointer"
-                >
-                  Complete Registration & Log In Now
-                </button>
-              </div>
-
               <div className="flex justify-end pt-1">
                 <button
                   type="button"
@@ -1062,6 +995,261 @@ create trigger on_auth_user_created
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* SCHEMA NULL TOKEN ERROR MODAL & 1-CLICK FIX */}
+      {showSchemaErrorModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in text-slate-800">
+          <div className="bg-white border border-slate-200 w-full max-w-lg rounded-2xl shadow-2xl p-6 sm:p-7 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">
+                    Fix: Database Error Querying Schema
+                  </h3>
+                  <p className="text-xs text-amber-600 font-mono">
+                    Supabase Auth NULL token scan issue
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowSchemaErrorModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs leading-relaxed text-slate-600">
+              <p>
+                In Supabase Auth (GoTrue), this error occurs when a user row in <code>auth.users</code> has <code>NULL</code> values in token fields (like <code>confirmation_token</code> or <code>recovery_token</code>) from a raw SQL insert.
+              </p>
+
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-900">1-Step SQL Cleanup:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const fixSql = `update auth.users
+set 
+  confirmation_token = coalesce(confirmation_token, ''),
+  recovery_token = coalesce(recovery_token, ''),
+  email_change = coalesce(email_change, ''),
+  email_change_token_new = coalesce(email_change_token_new, ''),
+  email_change_token_current = coalesce(email_change_token_current, ''),
+  phone_change = coalesce(phone_change, ''),
+  phone_change_token = coalesce(phone_change_token, '')
+where 
+  confirmation_token is null 
+  or recovery_token is null 
+  or email_change is null 
+  or email_change_token_new is null;`;
+                      navigator.clipboard.writeText(fixSql);
+                      setCopiedSchemaFixSql(true);
+                      setTimeout(() => setCopiedSchemaFixSql(false), 2000);
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#00A3E0] hover:bg-[#0092c9] text-white font-bold text-xs shadow cursor-pointer"
+                  >
+                    {copiedSchemaFixSql ? <Check className="w-3.5 h-3.5 text-white" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedSchemaFixSql ? 'Copied SQL!' : 'Copy 1-Step Fix SQL'}</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Run this in your <strong>Supabase Dashboard → SQL Editor</strong>. It converts all <code>NULL</code> token columns into clean empty strings.
+                </p>
+              </div>
+
+              <div className="p-3 bg-blue-50/70 border border-blue-100 rounded-xl text-slate-700">
+                <span className="font-bold text-slate-900">Alternative 10-Second Fix:</span>
+                <p className="text-[11px] mt-1 text-slate-600">
+                  Go to <strong>Authentication → Users</strong> in your Supabase Dashboard, click <strong>Add user → Create user</strong>, enter <code>business@javenly.com</code> (or your email), set a password, and toggle <strong>Auto Confirm: ON</strong>.
+                </p>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowSchemaErrorModal(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SUPABASE BACKEND CONFIGURATION MODAL */}
+      {showConfigModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in text-slate-800">
+          <div className="bg-white border border-slate-200 w-full max-w-lg rounded-2xl shadow-2xl p-6 sm:p-7 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-center text-[#00A3E0]">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">
+                    Supabase Project Settings
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Connect your free Supabase database and authentication
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowConfigModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                resetSupabaseClient(customUrl.trim(), customKey.trim());
+                setShowConfigModal(false);
+                setMessage({ type: 'success', text: 'Supabase credentials saved! Client reconnected.' });
+              }}
+              className="space-y-4 text-xs"
+            >
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Supabase Project URL
+                </label>
+                <input
+                  type="url"
+                  required
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                  placeholder="https://your-project-id.supabase.co"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:outline-none focus:border-[#00A3E0]"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Find this in your Supabase Dashboard → Settings → API.
+                </p>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Supabase Anon Public API Key
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={customKey}
+                  onChange={(e) => setCustomKey(e.target.value)}
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:outline-none focus:border-[#00A3E0]"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Use the <code>anon</code> public key, NOT the service_role key.
+                </p>
+              </div>
+
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
+                <div>
+                  <p className="font-bold text-slate-900">Need the complete Database SQL script?</p>
+                  <p className="text-[11px] text-slate-500">Creates profiles table, trigger, and sets admin role</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fullSql = `-- ====================================================================
+-- JAVENLY INNOVATIONS — COMPLETE SUPABASE DATABASE & AUTH SETUP
+-- Run this entire script in Supabase Dashboard -> SQL Editor -> New Query
+-- ====================================================================
+
+create extension if not exists "pgcrypto";
+
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text not null,
+  full_name text,
+  role text default 'Member',
+  company text default 'Javenly Innovations',
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+alter table public.profiles enable row level security;
+
+drop policy if exists "Allow reading all profiles" on public.profiles;
+create policy "Allow reading all profiles" on public.profiles for select using (true);
+
+drop policy if exists "Allow users to update own profile" on public.profiles;
+create policy "Allow users to update own profile" on public.profiles for update using (auth.uid() = id);
+
+drop policy if exists "Allow users to insert own profile" on public.profiles;
+create policy "Allow users to insert own profile" on public.profiles for insert with check (auth.uid() = id);
+
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.profiles (id, email, full_name, role, company)
+  values (
+    new.id,
+    new.email,
+    coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)),
+    case 
+      when lower(new.email) in ('admin@javenly.com', 'business@javenly.com') then 'Administrator'
+      else coalesce(new.raw_user_meta_data->>'role', 'Member')
+    end,
+    'Javenly Innovations'
+  )
+  on conflict (id) do update set
+    email = excluded.email,
+    full_name = coalesce(excluded.full_name, public.profiles.full_name),
+    role = case 
+      when lower(excluded.email) in ('admin@javenly.com', 'business@javenly.com') then 'Administrator'
+      else public.profiles.role 
+    end,
+    updated_at = now();
+  return new;
+exception when others then
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();`;
+                    navigator.clipboard.writeText(fullSql);
+                    setCopiedFullSql(true);
+                    setTimeout(() => setCopiedFullSql(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow"
+                >
+                  {copiedFullSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedFullSql ? 'Copied SQL!' : 'Copy Setup SQL'}</span>
+                </button>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowConfigModal(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-[#00A3E0] hover:bg-[#0092c9] shadow cursor-pointer"
+                >
+                  Save & Connect
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
