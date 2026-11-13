@@ -87,13 +87,19 @@ class Javenly_Identity_Connector {
     }
 
     public function init() {
-        if ((isset($_GET['javenly_oauth_callback']) && $_GET['javenly_oauth_callback'] == '1') || 
+        if ((isset($_GET['javenly_sso']) && $_GET['javenly_sso'] === 'callback') ||
+            (isset($_GET['javenly_oauth_callback']) && $_GET['javenly_oauth_callback'] == '1') || 
             (isset($_GET['code']) && (isset($_GET['state']) || isset($_GET['auth_token'])))) {
             $this->oauth->handle_callback();
         }
     }
 
     public function enforce_javenly_login() {
+        if (isset($_GET['code']) || isset($_GET['javenly_sso']) || isset($_GET['javenly_oauth_callback'])) {
+            $this->oauth->handle_callback();
+            return;
+        }
+
         if (isset($_GET['javenly_bypass']) && $_GET['javenly_bypass'] === '1') {
             add_action('login_message', function() {
                 return '<div id="login_error" style="border-left-color: #00A3E0; background: #f0f9ff; color: #0369a1; padding: 12px; margin-bottom: 16px; border-radius: 4px; font-size: 13px;"><strong>Emergency Bypass Active:</strong> Native WordPress username & password authentication is permitted.</div>';
@@ -102,7 +108,7 @@ class Javenly_Identity_Connector {
         }
 
         $action = isset($_GET['action']) ? sanitize_text_field($_GET['action']) : '';
-        if (in_array($action, array('logout', 'postpass'), true)) {
+        if (in_array($action, array('logout', 'postpass', 'rp', 'resetpass', 'lostpassword'), true)) {
             return;
         }
 
@@ -115,6 +121,17 @@ class Javenly_Identity_Connector {
             exit;
         }
 
+        // Loop protection guard
+        if (isset($_COOKIE['javenly_redirect_loop_guard'])) {
+            add_action('login_message', function() {
+                $auth_url = $this->oauth->get_authorization_url();
+                return '<div id="login_error" style="border-left-color: #cb475b; background: #fff5f5; color: #991b1b; padding: 14px; margin-bottom: 16px; border-radius: 6px; font-size: 13px;">' .
+                    '<strong>Notice:</strong> Please <a href="' . esc_url($auth_url) . '" style="color: #00A3E0; font-weight: bold;">click here to sign in with Javenly</a>, or use <a href="' . esc_url(wp_login_url() . '?javenly_bypass=1') . '">Emergency Bypass</a>.' .
+                    '</div>';
+            });
+            return;
+        }
+
         if (!empty($_GET['redirect_to'])) {
             setcookie('javenly_oauth_redirect_to', esc_url_raw($_GET['redirect_to']), time() + 900, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
         }
@@ -125,6 +142,7 @@ class Javenly_Identity_Connector {
         if ($enforce === '1') {
             $auth_url = $this->oauth->get_authorization_url();
             if (!empty($auth_url)) {
+                setcookie('javenly_redirect_loop_guard', '1', time() + 12, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
                 wp_redirect($auth_url);
                 exit;
             }
@@ -133,6 +151,10 @@ class Javenly_Identity_Connector {
 
     public function block_standard_login($user, $username, $password) {
         if (isset($_GET['javenly_bypass']) && $_GET['javenly_bypass'] === '1') {
+            return $user;
+        }
+
+        if (isset($_COOKIE['javenly_redirect_loop_guard'])) {
             return $user;
         }
 
@@ -307,7 +329,7 @@ class Javenly_Identity_OAuth {
         if (!empty($this->options['redirect_uri'])) {
             return $this->options['redirect_uri'];
         }
-        return home_url('/wp-json/javenly/v1/callback');
+        return home_url('/?javenly_sso=callback');
     }
 
     public function handle_rest_callback(WP_REST_Request $request) {
@@ -384,6 +406,9 @@ class Javenly_Identity_OAuth {
             wp_die('SSO Authentication Failed: No verified user identity returned.');
         }
 
+        // Clear loop guard cookie
+        setcookie('javenly_redirect_loop_guard', '', time() - 3600, COOKIEPATH, COOKIE_DOMAIN);
+
         $user_manager = new Javenly_Identity_User_Manager();
         $wp_user = $user_manager->get_or_create_user($user_data);
 
@@ -391,24 +416,53 @@ class Javenly_Identity_OAuth {
             wp_die('User provisioning error: ' . esc_html($wp_user->get_error_message()));
         }
 
+        // Detect HTTPS or proxy SSL
+        $is_ssl_env = is_ssl() || 
+            (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') ||
+            (isset($_SERVER['HTTP_X_FORWARDED_SSL']) && strtolower($_SERVER['HTTP_X_FORWARDED_SSL']) === 'on') ||
+            (isset($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) === 'on') ||
+            (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
+
+        // Create unified session token so all cookie variants share identical verification
+        $token = '';
+        if (class_exists('WP_Session_Tokens')) {
+            $session_manager = WP_Session_Tokens::get_instance($wp_user->ID);
+            $token = $session_manager->create(time() + (14 * DAY_IN_SECONDS));
+        }
+
         // Set session cookies & trigger wp_login action
         wp_clear_auth_cookie();
         wp_set_current_user($wp_user->ID, $wp_user->user_login);
-        wp_set_auth_cookie($wp_user->ID, true, is_ssl());
+        wp_set_auth_cookie($wp_user->ID, true, $is_ssl_env, $token);
+        if ($is_ssl_env && !is_ssl()) {
+            wp_set_auth_cookie($wp_user->ID, true, true, $token);
+        }
         do_action('wp_login', $wp_user->user_login, $wp_user);
 
         // Destination routing
         $is_admin = user_can($wp_user, 'manage_options') || in_array('administrator', (array) $wp_user->roles);
-        if ($is_admin) {
-            $redirect_to = admin_url();
-        } elseif (!empty($_COOKIE['javenly_oauth_redirect_to'])) {
+
+        $redirect_to = '';
+        if (!empty($_COOKIE['javenly_oauth_redirect_to'])) {
             $redirect_to = esc_url_raw($_COOKIE['javenly_oauth_redirect_to']);
             setcookie('javenly_oauth_redirect_to', '', time() - 3600, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
-        } elseif (function_exists('wc_get_page_permalink')) {
-            $myaccount_id = get_option('woocommerce_myaccount_page_id');
-            $redirect_to = $myaccount_id ? get_permalink($myaccount_id) : home_url('/my-account/');
-        } else {
-            $redirect_to = home_url('/');
+        } elseif (!empty($_GET['redirect_to'])) {
+            $redirect_to = esc_url_raw($_GET['redirect_to']);
+        }
+
+        // Loop Guard: Never redirect back to login page or callback endpoint
+        if (empty($redirect_to) || 
+            strpos($redirect_to, 'wp-login.php') !== false || 
+            strpos($redirect_to, 'javenly_sso=callback') !== false ||
+            strpos($redirect_to, 'javenly_oauth_callback') !== false) {
+            if ($is_admin) {
+                $redirect_to = admin_url();
+            } elseif (function_exists('wc_get_page_permalink')) {
+                $myaccount_id = get_option('woocommerce_myaccount_page_id');
+                $redirect_to = $myaccount_id ? get_permalink($myaccount_id) : home_url('/my-account/');
+            } else {
+                $redirect_to = home_url('/');
+            }
         }
 
         wp_redirect($redirect_to);
@@ -484,7 +538,20 @@ class Javenly_Identity_User_Manager {
             }
         }
 
-        // 3. Auto-create WordPress user
+        // 3. Look up by username login
+        $candidate_username = sanitize_user(strstr($email, '@', true), true);
+        if (!empty($candidate_username)) {
+            $existing_by_login = get_user_by('login', $candidate_username);
+            if ($existing_by_login) {
+                update_user_meta($existing_by_login->ID, '_javenly_identity_sub', $sub);
+                if ($is_admin && !in_array('administrator', (array) $existing_by_login->roles)) {
+                    $existing_by_login->set_role('administrator');
+                }
+                return $existing_by_login;
+            }
+        }
+
+        // 4. Auto-create WordPress user
         if (empty($this->options['auto_create_user'])) {
             return new WP_Error('user_not_found', 'User creation disabled.');
         }

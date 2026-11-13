@@ -94,7 +94,7 @@ class Javenly_Identity_OAuth {
         if (!empty($this->options['redirect_uri'])) {
             return $this->options['redirect_uri'];
         }
-        return home_url('/wp-json/javenly/v1/callback');
+        return home_url('/?javenly_sso=callback');
     }
 
     /**
@@ -237,6 +237,9 @@ class Javenly_Identity_OAuth {
             wp_die('SSO Authentication Failed: No verified user identity was returned from Javenly Identity.', 'SSO Error', array('back_link' => true));
         }
 
+        // Clear loop guard cookie immediately upon successful exchange
+        setcookie('javenly_redirect_loop_guard', '', time() - 3600, COOKIEPATH, COOKIE_DOMAIN);
+
         // Authenticate WordPress user via User Manager
         $user_manager = new Javenly_Identity_User_Manager();
         $wp_user = $user_manager->get_or_create_user($user_data);
@@ -245,25 +248,53 @@ class Javenly_Identity_OAuth {
             wp_die('WordPress account provisioning failed: ' . esc_html($wp_user->get_error_message()), 'Javenly Login Error', array('back_link' => true));
         }
 
+        // Detect HTTPS or proxy SSL
+        $is_ssl_env = is_ssl() || 
+            (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') ||
+            (isset($_SERVER['HTTP_X_FORWARDED_SSL']) && strtolower($_SERVER['HTTP_X_FORWARDED_SSL']) === 'on') ||
+            (isset($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) === 'on') ||
+            (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
+
+        // Create unified session token so all cookie variants share identical verification
+        $token = '';
+        if (class_exists('WP_Session_Tokens')) {
+            $session_manager = WP_Session_Tokens::get_instance($wp_user->ID);
+            $token = $session_manager->create(time() + (14 * DAY_IN_SECONDS));
+        }
+
         // Set WordPress authentication cookies and session
         wp_clear_auth_cookie();
         wp_set_current_user($wp_user->ID, $wp_user->user_login);
-        wp_set_auth_cookie($wp_user->ID, true, is_ssl());
+        wp_set_auth_cookie($wp_user->ID, true, $is_ssl_env, $token);
+        if ($is_ssl_env && !is_ssl()) {
+            wp_set_auth_cookie($wp_user->ID, true, true, $token);
+        }
         do_action('wp_login', $wp_user->user_login, $wp_user);
 
         // Determine destination redirect
         $is_admin = user_can($wp_user, 'manage_options') || in_array('administrator', (array) $wp_user->roles);
 
-        if ($is_admin) {
-            $redirect_to = admin_url();
-        } elseif (!empty($_COOKIE['javenly_oauth_redirect_to'])) {
+        $redirect_to = '';
+        if (!empty($_COOKIE['javenly_oauth_redirect_to'])) {
             $redirect_to = esc_url_raw($_COOKIE['javenly_oauth_redirect_to']);
             setcookie('javenly_oauth_redirect_to', '', time() - 3600, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
-        } elseif (function_exists('wc_get_page_permalink')) {
-            $myaccount_id = get_option('woocommerce_myaccount_page_id');
-            $redirect_to = $myaccount_id ? get_permalink($myaccount_id) : home_url('/my-account/');
-        } else {
-            $redirect_to = home_url('/');
+        } elseif (!empty($_GET['redirect_to'])) {
+            $redirect_to = esc_url_raw($_GET['redirect_to']);
+        }
+
+        // Critical Loop Guard: Never redirect back to login page or callback endpoint
+        if (empty($redirect_to) || 
+            strpos($redirect_to, 'wp-login.php') !== false || 
+            strpos($redirect_to, 'javenly_sso=callback') !== false ||
+            strpos($redirect_to, 'javenly_oauth_callback') !== false) {
+            if ($is_admin) {
+                $redirect_to = admin_url();
+            } elseif (function_exists('wc_get_page_permalink')) {
+                $myaccount_id = get_option('woocommerce_myaccount_page_id');
+                $redirect_to = $myaccount_id ? get_permalink($myaccount_id) : home_url('/my-account/');
+            } else {
+                $redirect_to = home_url('/');
+            }
         }
 
         wp_redirect($redirect_to);

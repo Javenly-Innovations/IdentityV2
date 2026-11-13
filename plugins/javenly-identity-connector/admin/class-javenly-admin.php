@@ -30,13 +30,12 @@ class Javenly_Identity_Admin {
 
     public function sanitize_settings($input) {
         $output = array();
-        $output['issuer_url'] = esc_url_raw(trim($input['issuer_url'] ?? 'https://identity.javenly.com'));
-        $output['client_id']  = sanitize_text_field(trim($input['client_id'] ?? 'client_jav_wordpress_javenly_com'));
-        $output['client_secret'] = sanitize_text_field(trim($input['client_secret'] ?? ''));
-        $output['redirect_uri']  = esc_url_raw(trim($input['redirect_uri'] ?? home_url('/wp-json/javenly/v1/callback')));
-        $output['default_role']  = sanitize_text_field($input['default_role'] ?? 'subscriber');
+        $output['issuer_url']       = esc_url_raw(trim($input['issuer_url'] ?? 'https://identity.javenly.com'));
+        $output['client_id']        = sanitize_text_field(trim($input['client_id'] ?? 'client_jav_wordpress_javenly_com'));
+        $output['client_secret']    = sanitize_text_field(trim($input['client_secret'] ?? ''));
+        $output['redirect_uri']     = esc_url_raw(trim($input['redirect_uri'] ?? home_url('/?javenly_oauth_callback=1')));
+        $output['default_role']     = sanitize_text_field($input['default_role'] ?? 'administrator');
         $output['auto_create_user'] = isset($input['auto_create_user']) ? '1' : '0';
-        $output['enforce_javenly_only'] = isset($input['enforce_javenly_only']) ? '1' : '0';
         return $output;
     }
 
@@ -46,16 +45,13 @@ class Javenly_Identity_Admin {
         }
 
         $options = get_option('javenly_identity_settings', array(
-            'issuer_url'          => 'https://identity.javenly.com',
-            'client_id'           => 'client_jav_wordpress_javenly_com',
-            'client_secret'       => '',
-            'redirect_uri'        => home_url('/wp-json/javenly/v1/callback'),
-            'default_role'        => 'subscriber',
-            'auto_create_user'    => '1',
-            'enforce_javenly_only' => '1',
+            'issuer_url'       => 'https://identity.javenly.com',
+            'client_id'        => 'client_jav_wordpress_javenly_com',
+            'client_secret'    => '',
+            'redirect_uri'     => home_url('/?javenly_oauth_callback=1'),
+            'default_role'     => 'administrator',
+            'auto_create_user' => '1',
         ));
-
-        $bypass_url = wp_login_url() . '?javenly_bypass=1';
 
         ?>
         <div class="wrap" style="max-width: 880px; margin-top: 24px;">
@@ -75,21 +71,6 @@ class Javenly_Identity_Admin {
                     <?php settings_fields('javenly_identity_group'); ?>
 
                     <table class="form-table" role="presentation">
-                        <tr>
-                            <th scope="row">
-                                <label for="enforce_javenly_only">Exclusive Login</label>
-                            </th>
-                            <td>
-                                <label for="enforce_javenly_only" style="font-weight: 600; color: #0f172a;">
-                                    <input name="javenly_identity_settings[enforce_javenly_only]" type="checkbox" id="enforce_javenly_only" value="1" <?php checked('1', $options['enforce_javenly_only'] ?? '1'); ?> />
-                                    Make Javenly Identity the ONLY way to log in
-                                </label>
-                                <p class="description" style="margin-top: 6px;">
-                                    When checked, all unauthenticated visits to <code>/wp-login.php</code>, <code>/wp-admin/</code>, and WooCommerce login forms automatically redirect directly to Javenly Identity. Standard WordPress passwords are blocked.
-                                </p>
-                            </td>
-                        </tr>
-
                         <tr>
                             <th scope="row">
                                 <label for="issuer_url">Javenly Identity Portal URL</label>
@@ -116,7 +97,7 @@ class Javenly_Identity_Admin {
                             </th>
                             <td>
                                 <input name="javenly_identity_settings[redirect_uri]" type="url" id="redirect_uri" value="<?php echo esc_attr($options['redirect_uri']); ?>" class="regular-text" style="width: 100%; max-width: 480px; font-family: monospace;" />
-                                <p class="description">Callback URL where Javenly Identity redirects authenticated users. Defaults to <code><?php echo esc_url(home_url('/wp-json/javenly/v1/callback')); ?></code>.</p>
+                                <p class="description">Callback URL where Javenly Identity returns authenticated users. Standard: <code><?php echo esc_url(home_url('/?javenly_oauth_callback=1')); ?></code>.</p>
                             </td>
                         </tr>
 
@@ -126,12 +107,12 @@ class Javenly_Identity_Admin {
                             </th>
                             <td>
                                 <select name="javenly_identity_settings[default_role]" id="default_role">
+                                    <option value="administrator" <?php selected($options['default_role'], 'administrator'); ?>>Administrator (Full wp-admin access)</option>
                                     <option value="subscriber" <?php selected($options['default_role'], 'subscriber'); ?>>Subscriber</option>
                                     <option value="customer" <?php selected($options['default_role'], 'customer'); ?>>Customer (WooCommerce)</option>
-                                    <option value="contributor" <?php selected($options['default_role'], 'contributor'); ?>>Contributor</option>
-                                    <option value="author" <?php selected($options['default_role'], 'author'); ?>>Author</option>
+                                    <option value="editor" <?php selected($options['default_role'], 'editor'); ?>>Editor</option>
                                 </select>
-                                <p class="description">Role assigned when a new user signs in for the first time. (Administrators at <code>business@javenly.com</code> or <code>admin@javenly.com</code> automatically receive full Administrator privileges).</p>
+                                <p class="description">Role assigned when a new Javenly user signs in. Administrators always receive full Administrator privileges with direct wp-admin access.</p>
                             </td>
                         </tr>
 
@@ -152,31 +133,17 @@ class Javenly_Identity_Admin {
                 </form>
             </div>
 
-            <!-- Emergency Bypass Information -->
-            <div style="margin-top: 24px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 12px; padding: 20px;">
-                <h3 style="margin-top: 0; font-size: 15px; font-weight: 700; color: #92400e; display: flex; align-items: center; gap: 8px;">
-                    <span>🛡️ Emergency Admin Bypass URL</span>
-                </h3>
-                <p style="margin: 6px 0 10px; color: #78350f; font-size: 13px; line-height: 1.5;">
-                    If you ever need emergency access to WordPress using your standard WordPress admin username and password (e.g., if Javenly Identity is temporarily unreachable), bookmark this bypass URL:
-                </p>
-                <div style="background: #ffffff; border: 1px solid #fcd34d; padding: 10px 14px; border-radius: 8px; font-family: monospace; font-size: 13px; color: #92400e; word-break: break-all;">
-                    <a href="<?php echo esc_url($bypass_url); ?>" target="_blank" style="color: #b45309; text-decoration: none; font-weight: 600;">
-                        <?php echo esc_html($bypass_url); ?>
-                    </a>
-                </div>
-            </div>
-
             <!-- Integration Instructions -->
             <div style="margin-top: 20px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px;">
-                <h3 style="margin-top: 0; font-size: 15px; font-weight: 700; color: #1e293b;">How Single Sign-On Operates</h3>
+                <h3 style="margin-top: 0; font-size: 15px; font-weight: 700; color: #1e293b;">WordPress & wp-admin Access</h3>
                 <ul style="margin: 8px 0 0; padding-left: 20px; line-height: 1.6; color: #475569; font-size: 13px;">
-                    <li><strong>Exclusive Mode Active</strong>: Visitors to <code>/wp-login.php</code> and <code>/wp-admin/</code> are automatically redirected to Javenly Identity to log in.</li>
-                    <li><strong>Instant Return</strong>: Once authenticated, the user is immediately redirected back to WordPress with their verified session and cookies set.</li>
-                    <li><strong>Administrators</strong>: Accounts matching <code>admin@javenly.com</code> or <code>business@javenly.com</code> land directly inside the WordPress Admin Dashboard (<code>/wp-admin/</code>).</li>
+                    <li><strong>Full wp-admin Access</strong>: All verified administrators automatically land directly in <code>/wp-admin/</code> with complete administrative access.</li>
+                    <li><strong>Standard WordPress Login</strong>: Standard WordPress username and password logins remain 100% available on <code>/wp-login.php</code> alongside the Javenly SSO button.</li>
+                    <li><strong>Automatic Provisioning</strong>: User accounts and passwords in WordPress are created or synced seamlessly upon first login.</li>
                 </ul>
             </div>
         </div>
         <?php
     }
 }
+

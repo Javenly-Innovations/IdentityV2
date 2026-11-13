@@ -14,7 +14,18 @@ if (!defined('ABSPATH')) {
     exit; // Exit if accessed directly
 }
 
-define('JAVENLY_IDENTITY_VERSION', '1.0.0');
+// Normalize Reverse Proxy SSL (Cloudflare, cPanel, Namecheap proxy)
+if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+}
+if (isset($_SERVER['HTTP_CF_VISITOR'])) {
+    $visitor = json_decode($_SERVER['HTTP_CF_VISITOR'], true);
+    if (isset($visitor['scheme']) && $visitor['scheme'] === 'https') {
+        $_SERVER['HTTPS'] = 'on';
+    }
+}
+
+define('JAVENLY_IDENTITY_VERSION', '1.1.0');
 define('JAVENLY_IDENTITY_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('JAVENLY_IDENTITY_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -65,7 +76,8 @@ class Javenly_Identity_Connector {
 
     public function init() {
         // Intercept OAuth callback via query parameters anywhere on site
-        if ((isset($_GET['javenly_oauth_callback']) && $_GET['javenly_oauth_callback'] == '1') || 
+        if ((isset($_GET['javenly_sso']) && $_GET['javenly_sso'] === 'callback') ||
+            (isset($_GET['javenly_oauth_callback']) && $_GET['javenly_oauth_callback'] == '1') || 
             (isset($_GET['code']) && (isset($_GET['state']) || isset($_GET['auth_token'])))) {
             $this->oauth->handle_callback();
         }
@@ -75,7 +87,13 @@ class Javenly_Identity_Connector {
      * Enforce Javenly Identity as the exclusive login provider for wp-login.php & wp-admin
      */
     public function enforce_javenly_login() {
-        // 1. Emergency Bypass parameter (?javenly_bypass=1) allows native WordPress login
+        // 1. If authorization code or callback parameter is present, DO NOT REDIRECT! Process callback
+        if (isset($_GET['code']) || isset($_GET['javenly_sso']) || isset($_GET['javenly_oauth_callback'])) {
+            $this->oauth->handle_callback();
+            return;
+        }
+
+        // 2. Emergency Bypass parameter (?javenly_bypass=1) allows native WordPress login
         if (isset($_GET['javenly_bypass']) && $_GET['javenly_bypass'] === '1') {
             add_action('login_message', function() {
                 return '<div id="login_error" style="border-left-color: #00A3E0; background: #f0f9ff; color: #0369a1; padding: 12px; margin-bottom: 16px; border-radius: 4px; font-size: 13px;"><strong>Emergency Bypass Active:</strong> Native WordPress username & password authentication is permitted.</div>';
@@ -83,13 +101,13 @@ class Javenly_Identity_Connector {
             return;
         }
 
-        // 2. Allow core non-login actions (logout, password protected posts)
+        // 3. Allow core non-login actions (logout, password reset, postpass)
         $action = isset($_GET['action']) ? sanitize_text_field($_GET['action']) : '';
-        if (in_array($action, array('logout', 'postpass'), true)) {
+        if (in_array($action, array('logout', 'postpass', 'rp', 'resetpass', 'lostpassword'), true)) {
             return;
         }
 
-        // 3. If already logged in, redirect to admin or home
+        // 4. If already logged in, redirect to admin or home
         if (is_user_logged_in()) {
             if (current_user_can('manage_options')) {
                 wp_redirect(admin_url());
@@ -99,19 +117,36 @@ class Javenly_Identity_Connector {
             exit;
         }
 
-        // 4. Save intended destination if provided
+        // 5. CRITICAL REDIRECT LOOP GUARD:
+        // If a redirect to Javenly Identity happened within the last 12 seconds and returned unauthenticated,
+        // stop the loop! Display a clear notification with a manual button rather than looping infinitely.
+        if (isset($_COOKIE['javenly_redirect_loop_guard'])) {
+            add_action('login_message', function() {
+                $auth_url = $this->oauth->get_authorization_url();
+                return '<div id="login_error" style="border-left-color: #cb475b; background: #fff5f5; color: #991b1b; padding: 14px; margin-bottom: 16px; border-radius: 6px; font-size: 13px; line-height: 1.5;">' .
+                    '<strong>Single Sign-On Notice:</strong> Authentication cycle completed. Click below to sign in or use standard admin credentials if needed:<br>' .
+                    '<a href="' . esc_url($auth_url) . '" class="button button-primary" style="margin-top: 8px; display: inline-block;">Sign in with Javenly Identity</a> ' .
+                    '<a href="' . esc_url(wp_login_url() . '?javenly_bypass=1') . '" style="margin-left: 10px; font-size: 12px; color: #64748b;">Emergency Bypass</a>' .
+                    '</div>';
+            });
+            return;
+        }
+
+        // 6. Save intended destination if provided
         if (!empty($_GET['redirect_to'])) {
             $dest = esc_url_raw($_GET['redirect_to']);
             setcookie('javenly_oauth_redirect_to', $dest, time() + 900, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
         }
 
-        // 5. Check if enforce is active (defaults to 1 = enabled)
+        // 7. Check if enforce is active (defaults to 1 = enabled)
         $options = get_option('javenly_identity_settings', array());
         $enforce = $options['enforce_javenly_only'] ?? '1';
 
         if ($enforce === '1') {
             $auth_url = $this->oauth->get_authorization_url();
             if (!empty($auth_url)) {
+                // Set temporary loop guard cookie for 12 seconds
+                setcookie('javenly_redirect_loop_guard', '1', time() + 12, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
                 wp_redirect($auth_url);
                 exit;
             }
@@ -123,6 +158,11 @@ class Javenly_Identity_Connector {
      */
     public function block_standard_login($user, $username, $password) {
         if (isset($_GET['javenly_bypass']) && $_GET['javenly_bypass'] === '1') {
+            return $user;
+        }
+
+        // If loop guard was triggered, allow emergency password login so admin is never locked out
+        if (isset($_COOKIE['javenly_redirect_loop_guard'])) {
             return $user;
         }
 

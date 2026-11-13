@@ -163,19 +163,6 @@ export default function App() {
     return `${request.redirectUri}${separator}${params.toString()}`;
   };
 
-  // Auto-redirect if user arrives already logged in with active OAuth request
-  useEffect(() => {
-    if (activeOAuthRequest && currentUser) {
-      const timer = setTimeout(() => {
-        const callbackUrl = buildOAuthCallbackUrl(activeOAuthRequest, currentUser);
-        if (callbackUrl) {
-          window.location.href = callbackUrl;
-        }
-      }, 1200);
-      return () => clearTimeout(timer);
-    }
-  }, [activeOAuthRequest, currentUser]);
-
   // Handle Log In - strictly verified via Supabase Auth
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();

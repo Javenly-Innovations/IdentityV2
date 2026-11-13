@@ -78,7 +78,20 @@ class Javenly_Identity_User_Manager {
             }
         }
 
-        // 3. Auto-create new WordPress user if enabled
+        // 3. Look up by username login if it matches existing account
+        $candidate_username = sanitize_user(strstr($email, '@', true), true);
+        if (!empty($candidate_username)) {
+            $existing_by_login = get_user_by('login', $candidate_username);
+            if ($existing_by_login) {
+                update_user_meta($existing_by_login->ID, '_javenly_identity_sub', $sub);
+                if ($is_admin && !in_array('administrator', (array) $existing_by_login->roles)) {
+                    $existing_by_login->set_role('administrator');
+                }
+                return $existing_by_login;
+            }
+        }
+
+        // 4. Auto-create new WordPress user if enabled
         if (empty($this->options['auto_create_user'])) {
             return new WP_Error('user_not_found', 'No existing WordPress user found for this Javenly account and auto-creation is disabled.');
         }
